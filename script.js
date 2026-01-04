@@ -314,14 +314,14 @@ function updateProductList() {
         
         row.innerHTML = `
             <td>${index + 1}</td>
-            <td>${product.barcode}</td>
+            <td${validityStyle}>${product.validity}</td>
+            <td><span class="status status-${status}">${getStatusText(status)}</span></td>
             <td${nameStyle}>${product.productName}</td>
             <td>${product.type}</td>
             <td>${product.scanDate}</td>
             <td>${product.productionDate || '-'}</td>
             <td>${product.shelfLife || '-'}</td>
-            <td${validityStyle}>${product.validity}</td>
-            <td><span class="status status-${status}">${getStatusText(status)}</span></td>
+            <td>${product.barcode}</td>
             <td${actionStyle}>
                 <button class="btn btn-secondary" onclick="editProduct('${product.id}')">编辑</button>
                 <button class="btn btn-danger" onclick="deleteProduct('${product.id}')">删除</button>
