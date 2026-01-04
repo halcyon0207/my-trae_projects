@@ -145,22 +145,31 @@ input:focus {
 /* 图表区域 */
 .chart-section {
     height: 400px;
-    margin-bottom: 20px;
+    margin-bottom: 40px;
+    position: relative;
+    z-index: 1;
+    background-color: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
 /* 表格样式 */
 /* 重新设计列表结构，将固定元素放在滚动区域外 */
 .list-section, .mapping-section {
     margin-bottom: 30px;
+    margin-top: 40px;
     border-radius: 8px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     overflow: hidden;
     background-color: white;
     position: relative;
+    z-index: 2;
+    padding-top: 0;
 }
 
 /* 列表标题 */
-.list-section h2,
+.list-section h2, 
 .mapping-section h2 {
     background-color: #4CAF50;
     color: white;
@@ -169,6 +178,8 @@ input:focus {
     font-size: 1.3rem;
     border-radius: 8px 8px 0 0;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    position: relative;
+    z-index: 10;
 }
 
 /* 搜索框和控制区域 */
@@ -180,6 +191,8 @@ input:focus {
     border-bottom: 1px solid #eee;
     background-color: white;
     box-shadow: 0 2px 2px rgba(0,0,0,0.05);
+    position: relative;
+    z-index: 5;
 }
 
 /* 滚动内容区域 */
