@@ -147,57 +147,50 @@ input:focus {
 }
 
 /* 表格样式 */
+/* 重新设计列表结构，将固定元素放在滚动区域外 */
 .list-section, .mapping-section {
-    overflow-x: auto;
-    max-height: 600px;
-    overflow-y: auto;
-    position: relative;
     margin-bottom: 30px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+    background-color: white;
 }
 
-/* 固定列表标题 */
+/* 列表标题 */
 .list-section h2,
 .mapping-section h2 {
-    position: sticky;
-    top: 0;
-    z-index: 30;
     background-color: #4CAF50;
     color: white;
-    padding: 12px 15px;
-    margin: 0 -15px 15px -15px;
-    border-radius: 8px 8px 0 0;
+    padding: 15px;
+    margin: 0;
     font-size: 1.3rem;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    border-radius: 8px 8px 0 0;
 }
 
 /* 固定搜索框和控制区域 */
 .list-section .search-controls,
 .mapping-section .search-controls,
 .mapping-section .mapping-controls {
-    position: sticky;
-    top: 60px;
-    z-index: 20;
-    background-color: white;
     padding: 15px;
-    margin: 0 -15px 15px -15px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin: 0;
+    border-bottom: 1px solid #eee;
+    background-color: white;
 }
 
-/* 调整表格上方的间距，避免被固定元素遮挡 */
-.list-section, .mapping-section {
-    padding: 0 15px;
+/* 滚动内容区域 */
+.list-section .scrollable-content,
+.mapping-section .scrollable-content {
+    overflow-x: auto;
+    max-height: 400px;
+    overflow-y: auto;
 }
 
+/* 表格样式 */
 .list-section table,
 .mapping-section table {
-    margin-top: 0;
     width: 100%;
-}
-
-table {
     border-collapse: collapse;
     font-size: 12px;
-    border-spacing: 0;
 }
 
 th, td {
@@ -214,8 +207,8 @@ th {
     color: #333;
     font-size: 11px;
     position: sticky;
-    top: 120px;
-    z-index: 15;
+    top: 0;
+    z-index: 10;
     box-shadow: 0 2px 2px -1px rgba(0,0,0,0.1);
 }
 

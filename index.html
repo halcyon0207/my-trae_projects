@@ -70,25 +70,27 @@
                     <button id="productSearchBtn" class="btn btn-secondary">搜索</button>
                     <button id="productClearSearchBtn" class="btn btn-secondary">清空</button>
                 </div>
-                <table id="productTable">
-                    <thead>
-                        <tr>
-                            <th>序号</th>
-                            <th>条码</th>
-                            <th>名称</th>
-                            <th>类型</th>
-                            <th>扫描日期</th>
-                            <th>生产日期</th>
-                            <th>保质期(月)</th>
-                            <th>有效期</th>
-                            <th>状态</th>
-                            <th>操作</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <!-- 商品数据将通过JavaScript动态添加 -->
-                    </tbody>
-                </table>
+                <div class="scrollable-content">
+                    <table id="productTable">
+                        <thead>
+                            <tr>
+                                <th>序号</th>
+                                <th>条码</th>
+                                <th>名称</th>
+                                <th>类型</th>
+                                <th>扫描日期</th>
+                                <th>生产日期</th>
+                                <th>保质期(月)</th>
+                                <th>有效期</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- 商品数据将通过JavaScript动态添加 -->
+                        </tbody>
+                    </table>
+                </div>
             </section>
 
             <!-- 商品条码映射管理 -->
@@ -104,19 +106,21 @@
                     <input type="text" id="newProductName" placeholder="商品名称">
                     <button id="addMappingBtn" class="btn btn-primary">添加映射</button>
                 </div>
-                <table id="mappingTable">
-                    <thead>
-                        <tr>
-                            <th>序号</th>
-                            <th>条码</th>
-                            <th>商品名称</th>
-                            <th>操作</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <!-- 映射数据将通过JavaScript动态添加 -->
-                    </tbody>
-                </table>
+                <div class="scrollable-content">
+                    <table id="mappingTable">
+                        <thead>
+                            <tr>
+                                <th>序号</th>
+                                <th>条码</th>
+                                <th>商品名称</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- 映射数据将通过JavaScript动态添加 -->
+                        </tbody>
+                    </table>
+                </div>
             </section>
         </main>
     </div>
