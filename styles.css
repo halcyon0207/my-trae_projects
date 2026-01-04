@@ -30,12 +30,16 @@ header h1 {
     font-weight: 600;
 }
 
-section {
+.form-section {
     background-color: white;
     margin-bottom: 20px;
     padding: 20px;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
 }
 
 section h2 {
@@ -152,6 +156,25 @@ input:focus {
     max-height: 600px;
     overflow-y: auto;
     position: relative;
+}
+
+/* 固定搜索框和控制区域 */
+.list-section .search-controls,
+.mapping-section .search-controls,
+.mapping-section .mapping-controls {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background-color: white;
+    padding: 10px 0;
+    margin-bottom: 15px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* 调整表格上方的间距，避免被固定元素遮挡 */
+.list-section table,
+.mapping-section table {
+    margin-top: 0;
 }
 
 table {
