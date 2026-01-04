@@ -152,6 +152,22 @@ input:focus {
     max-height: 600px;
     overflow-y: auto;
     position: relative;
+    margin-bottom: 30px;
+}
+
+/* 固定列表标题 */
+.list-section h2,
+.mapping-section h2 {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background-color: #4CAF50;
+    color: white;
+    padding: 12px 15px;
+    margin: 0 -15px 15px -15px;
+    border-radius: 8px 8px 0 0;
+    font-size: 1.3rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
 /* 固定搜索框和控制区域 */
@@ -159,24 +175,27 @@ input:focus {
 .mapping-section .search-controls,
 .mapping-section .mapping-controls {
     position: sticky;
-    top: 0;
+    top: 60px;
     z-index: 20;
     background-color: white;
-    padding: 10px 0;
-    margin-bottom: 15px;
+    padding: 15px;
+    margin: 0 -15px 15px -15px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
 /* 调整表格上方的间距，避免被固定元素遮挡 */
+.list-section, .mapping-section {
+    padding: 0 15px;
+}
+
 .list-section table,
 .mapping-section table {
     margin-top: 0;
+    width: 100%;
 }
 
 table {
-    width: 100%;
     border-collapse: collapse;
-    margin-top: 15px;
     font-size: 12px;
     border-spacing: 0;
 }
@@ -195,8 +214,8 @@ th {
     color: #333;
     font-size: 11px;
     position: sticky;
-    top: 0;
-    z-index: 10;
+    top: 120px;
+    z-index: 15;
     box-shadow: 0 2px 2px -1px rgba(0,0,0,0.1);
 }
 
