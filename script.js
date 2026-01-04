@@ -7,15 +7,43 @@ const APP_ID = 'Cg0xX6uA9mETD5p7zQcTzk3m-gzGzoHsz'; // 用户提供的 LeanCloud
 const APP_KEY = 'GAEgrcnZ3NRsEYvB1n6CyyGJ'; // 用户提供的 LeanCloud App Key
 const SERVER_URL = 'https://cg0xx6ua.lc-cn-n1-shared.com'; // 用户提供的 LeanCloud 服务器地址
 
+// 添加LeanCloud初始化状态变量
+let leanCloudInitialized = false;
+
 console.log('准备初始化LeanCloud:', { APP_ID, APP_KEY, SERVER_URL });
 
-AV.init({
-    appId: APP_ID,
-    appKey: APP_KEY,
-    serverURL: SERVER_URL
-});
-
-console.log('LeanCloud初始化完成:', { appId: AV.applicationId, serverURL: AV.serverURL });
+try {
+    AV.init({
+        appId: APP_ID,
+        appKey: APP_KEY,
+        serverURL: SERVER_URL
+    });
+    
+    leanCloudInitialized = true;
+    console.log('LeanCloud初始化完成:', { appId: AV.applicationId, serverURL: AV.serverURL, initialized: leanCloudInitialized });
+} catch (error) {
+    leanCloudInitialized = false;
+    console.error('LeanCloud初始化失败:', error);
+    // 显示初始化失败的提示
+    const initErrorNotification = document.createElement('div');
+    initErrorNotification.style.position = 'fixed';
+    initErrorNotification.style.top = '20px';
+    initErrorNotification.style.left = '50%';
+    initErrorNotification.style.transform = 'translateX(-50%)';
+    initErrorNotification.style.backgroundColor = '#f44336';
+    initErrorNotification.style.color = 'white';
+    initErrorNotification.style.padding = '15px';
+    initErrorNotification.style.borderRadius = '8px';
+    initErrorNotification.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
+    initErrorNotification.style.zIndex = '1000';
+    initErrorNotification.style.fontSize = '14px';
+    initErrorNotification.textContent = 'LeanCloud初始化失败，请检查配置和网络连接！';
+    document.body.appendChild(initErrorNotification);
+    
+    setTimeout(() => {
+        document.body.removeChild(initErrorNotification);
+    }, 5000);
+}
 
 // 页面加载完成后初始化
 document.addEventListener('DOMContentLoaded', function() {
@@ -84,6 +112,9 @@ function bindEventListeners() {
     
     // 获取最新数据
     document.getElementById('fetchBtn').addEventListener('click', fetchLatestDataFromCloud);
+    
+    // 筛选1个月内到期商品
+    document.getElementById('filterBtn').addEventListener('click', filterOneMonthExpiry);
     
     // 添加映射
     document.getElementById('addMappingBtn').addEventListener('click', addMapping);
@@ -199,37 +230,61 @@ function saveMappings() {
     localStorage.setItem('productMappings', JSON.stringify(productMappings));
 }
 
+// 全局变量：当前显示模式（all 或 filter）
+let currentDisplayMode = 'all';
+
 // 更新商品列表
 function updateProductList() {
     console.log('updateProductList函数被调用，原始商品数量:', products.length);
     const tbody = document.querySelector('#productTable tbody');
     tbody.innerHTML = '';
     
+    // 获取要显示的商品列表
+    let displayProducts = [...products];
+    
+    // 如果是筛选模式，只显示1个月内到期的商品
+    if (currentDisplayMode === 'filter') {
+        displayProducts = displayProducts.filter(product => {
+            const status = getExpiryStatus(product.validity);
+            return status === 'danger' || status === 'expired';
+        });
+    }
+    
     // 按到期日期排序（已过期的排前面，然后按有效期从近到远）
-    const sortedProducts = [...products].sort((a, b) => {
+    const sortedProducts = displayProducts.sort((a, b) => {
         const dateA = new Date(a.validity);
         const dateB = new Date(b.validity);
         const result = dateA - dateB;
         return result;
     });
     
-    console.log('排序后的商品列表:', sortedProducts);
+    console.log('显示商品列表:', sortedProducts);
     
     sortedProducts.forEach((product, index) => {
         const row = document.createElement('tr');
         const status = getExpiryStatus(product.validity);
         
+        // 筛选模式下高亮显示关键信息
+        let nameStyle = '';
+        let validityStyle = '';
+        let actionStyle = '';
+        if (currentDisplayMode === 'filter') {
+            nameStyle = ' style="font-weight: bold; color: red;"';
+            validityStyle = ' style="font-weight: bold; color: red;"';
+            actionStyle = ' style="font-weight: bold;"';
+        }
+        
         row.innerHTML = `
             <td>${index + 1}</td>
             <td>${product.barcode}</td>
-            <td>${product.productName}</td>
+            <td${nameStyle}>${product.productName}</td>
             <td>${product.type}</td>
             <td>${product.scanDate}</td>
             <td>${product.productionDate || '-'}</td>
             <td>${product.shelfLife || '-'}</td>
-            <td>${product.validity}</td>
+            <td${validityStyle}>${product.validity}</td>
             <td><span class="status status-${status}">${getStatusText(status)}</span></td>
-            <td>
+            <td${actionStyle}>
                 <button class="btn btn-secondary" onclick="editProduct('${product.id}')">编辑</button>
                 <button class="btn btn-danger" onclick="deleteProduct('${product.id}')">删除</button>
             </td>
@@ -237,6 +292,29 @@ function updateProductList() {
         
         tbody.appendChild(row);
     });
+}
+
+// 筛选1个月内到期的商品
+function filterOneMonthExpiry() {
+    console.log('开始筛选1个月内到期的商品');
+    
+    // 切换显示模式
+    currentDisplayMode = currentDisplayMode === 'all' ? 'filter' : 'all';
+    
+    // 更新按钮文本
+    const filterBtn = document.getElementById('filterBtn');
+    if (currentDisplayMode === 'filter') {
+        filterBtn.textContent = '显示所有商品';
+        filterBtn.classList.remove('btn-warning');
+        filterBtn.classList.add('btn-success');
+    } else {
+        filterBtn.textContent = '筛选1个月内到期商品';
+        filterBtn.classList.remove('btn-success');
+        filterBtn.classList.add('btn-warning');
+    }
+    
+    // 更新商品列表
+    updateProductList();
 }
 
 // 获取到期状态
@@ -316,6 +394,12 @@ window.deleteProduct = function(id) {
     if (confirm('确定要删除这个商品吗？')) {
         // 使用多种比较方式确保兼容不同类型的ID
         const initialLength = products.length;
+        
+        // 先找到要删除的商品对象，以便获取条码信息
+        const productToDelete = products.find(p => {
+            return p.id === id || p.id == id || String(p.id) === String(id);
+        });
+        
         products = products.filter(p => {
             const match = p.id !== id && p.id != id && String(p.id) !== String(id);
             if (!match) {
@@ -330,7 +414,51 @@ window.deleteProduct = function(id) {
         updateProductList();
         updateChart();
         
-        // 取消自动同步，仅通过手动点击按钮触发
+        // 同步删除LeanCloud中的数据
+        if (productToDelete && APP_ID !== 'your_app_id' && APP_KEY !== 'your_app_key') {
+            // 检查LeanCloud是否初始化成功
+            if (!leanCloudInitialized) {
+                console.log('LeanCloud尚未初始化，跳过云端删除操作');
+                return;
+            }
+            
+            console.log('开始同步删除LeanCloud中的商品数据，条码:', productToDelete.barcode);
+            try {
+                const Product = AV.Object.extend('Product');
+                const query = new AV.Query(Product);
+                query.equalTo('barcode', productToDelete.barcode);
+                query.first().then(existingProduct => {
+                    if (existingProduct) {
+                        console.log('在LeanCloud中找到对应商品，开始删除:', existingProduct);
+                        return existingProduct.destroy();
+                    } else {
+                        console.log('未在LeanCloud中找到对应商品，条码:', productToDelete.barcode);
+                        return null;
+                    }
+                }).then(() => {
+                    console.log('成功从LeanCloud删除商品数据:', productToDelete.barcode);
+                }).catch(error => {
+                    console.error('从LeanCloud删除商品数据失败:', error);
+                    let errorMsg = '从LeanCloud删除商品数据失败: ' + (error.message || '未知错误');
+                    let errorDetails = '';
+                    
+                    if (error.code === 401) {
+                        errorDetails = '\n\n错误原因：身份验证失败，请检查App ID和App Key是否正确。';
+                    } else if (error.code === 403) {
+                        errorDetails = '\n\n错误原因：权限不足，请检查LeanCloud应用的安全设置。';
+                    } else if (error.code === 429) {
+                        errorDetails = '\n\n错误原因：请求频率过高，请稍后重试。';
+                    } else if (error.code === 100) {
+                        errorDetails = '\n\n错误原因：网络连接失败，请检查您的网络连接。';
+                    }
+                    
+                    errorMsg += errorDetails;
+                    console.error(errorMsg);
+                });
+            } catch (error) {
+                console.error('LeanCloud删除操作初始化失败:', error);
+            }
+        }
     }
 }
 
@@ -787,6 +915,11 @@ function realSyncData() {
         return;
     }
     
+    if (!leanCloudInitialized) {
+        alert('LeanCloud尚未成功初始化，请检查网络连接或配置信息！');
+        return;
+    }
+    
     console.log('开始使用真实 LeanCloud 同步数据...');
     console.log('配置信息:', { APP_ID, APP_KEY, serverURL: AV.serverURL });
     
@@ -1056,15 +1189,29 @@ function realSyncData() {
                 document.body.removeChild(syncNotification);
             }, 5000);
             
-            let errorMsg = '数据同步失败: ' + error.message;
+            let errorMsg = '数据同步失败: ' + (error.message || '未知错误');
+            let errorDetails = '';
             
-            // 针对API域名白名单错误提供更具体的解决方案
-            if (error.message.includes('Access denied by api domain white list')) {
+            // 根据错误类型提供更具体的解决方案
+            if (error.code === 401) {
+                errorDetails = '\n\n错误原因：身份验证失败，请检查App ID和App Key是否正确。';
+            } else if (error.code === 403) {
+                errorDetails = '\n\n错误原因：权限不足，请检查LeanCloud应用的安全设置。';
+            } else if (error.code === 429) {
+                errorDetails = '\n\n错误原因：请求频率过高，请稍后重试或减少同步数据量。';
+            } else if (error.code === 100) {
+                errorDetails = '\n\n错误原因：网络连接失败，请检查您的网络连接。';
+            } else if (error.message.includes('Access denied by api domain white list')) {
                 const origin = error.message.match(/request origin header is '(.*?)'/);
                 if (origin && origin[1]) {
-                    errorMsg += `\n\n解决方案：\n1. 登录 LeanCloud 控制台\n2. 进入应用设置 > 安全中心 > Web安全域名\n3. 在输入框中添加：${origin[1]}\n4. 点击保存后重新尝试`;
+                    errorDetails = `\n\n错误原因：API域名白名单限制\n\n解决方案：\n1. 登录 LeanCloud 控制台\n2. 进入应用设置 > 安全中心 > Web安全域名\n3. 在输入框中添加：${origin[1]}\n4. 点击保存后重新尝试`;
                 }
+            } else if (error.message.includes('timeout') || error.message.includes('Timeout')) {
+                errorDetails = '\n\n错误原因：请求超时，请检查网络连接或稍后重试。';
             }
+            
+            errorMsg += errorDetails;
+            errorMsg += '\n\n建议：\n1. 检查网络连接是否正常\n2. 确认LeanCloud配置信息是否正确\n3. 检查LeanCloud控制台中的应用状态\n4. 尝试刷新页面后重新同步';
             
             alert(errorMsg);
         });
@@ -1077,15 +1224,8 @@ function realSyncData() {
             document.body.removeChild(syncNotification);
         }, 5000);
         
-        let errorMsg = '数据同步失败: ' + error.message;
-        
-        // 针对API域名白名单错误提供更具体的解决方案
-        if (error.message.includes('Access denied by api domain white list')) {
-            const origin = error.message.match(/request origin header is '(.*?)'/);
-            if (origin && origin[1]) {
-                errorMsg += `\n\n解决方案：\n1. 登录 LeanCloud 控制台\n2. 进入应用设置 > 应用 Keys\n3. 在 API 域名白名单中添加：${origin[1]}\n4. 保存设置后重新尝试`;
-            }
-        }
+        let errorMsg = '数据同步失败: ' + (error.message || '未知错误');
+        errorMsg += '\n\n建议：\n1. 检查网络连接是否正常\n2. 确认LeanCloud配置信息是否正确\n3. 检查LeanCloud控制台中的应用状态\n4. 尝试刷新页面后重新同步';
         
         alert(errorMsg);
     }
@@ -1093,6 +1233,11 @@ function realSyncData() {
 
 // 从 LeanCloud 获取最新数据
 window.fetchLatestDataFromCloud = function() {
+    if (!leanCloudInitialized) {
+        alert('LeanCloud尚未成功初始化，请检查网络连接或配置信息！');
+        return;
+    }
+    
     console.log('开始从LeanCloud获取最新数据...');
     
     // 显示获取数据进度通知
@@ -1210,15 +1355,29 @@ window.fetchLatestDataFromCloud = function() {
             document.body.removeChild(fetchNotification);
         }, 5000);
         
-        let errorMsg = '数据获取失败: ' + error.message;
+        let errorMsg = '数据获取失败: ' + (error.message || '未知错误');
+        let errorDetails = '';
         
-        // 针对API域名白名单错误提供更具体的解决方案
-        if (error.message.includes('Access denied by api domain white list')) {
+        // 根据错误类型提供更具体的解决方案
+        if (error.code === 401) {
+            errorDetails = '\n\n错误原因：身份验证失败，请检查App ID和App Key是否正确。';
+        } else if (error.code === 403) {
+            errorDetails = '\n\n错误原因：权限不足，请检查LeanCloud应用的安全设置。';
+        } else if (error.code === 429) {
+            errorDetails = '\n\n错误原因：请求频率过高，请稍后重试或减少同步数据量。';
+        } else if (error.code === 100) {
+            errorDetails = '\n\n错误原因：网络连接失败，请检查您的网络连接。';
+        } else if (error.message.includes('Access denied by api domain white list')) {
             const origin = error.message.match(/request origin header is '(.*?)'/);
             if (origin && origin[1]) {
-                errorMsg += `\n\n解决方案：\n1. 登录 LeanCloud 控制台\n2. 进入应用设置 > 安全中心 > Web安全域名\n3. 在输入框中添加：${origin[1]}\n4. 点击保存后重新尝试`;
+                errorDetails = `\n\n解决方案：\n1. 登录 LeanCloud 控制台\n2. 进入应用设置 > 安全中心 > Web安全域名\n3. 在输入框中添加：${origin[1]}\n4. 点击保存后重新尝试`;
             }
+        } else if (error.message.includes('timeout') || error.message.includes('Timeout')) {
+            errorDetails = '\n\n错误原因：请求超时，请检查网络连接或稍后重试。';
         }
+        
+        errorMsg += errorDetails;
+        errorMsg += '\n\n建议：\n1. 检查网络连接是否正常\n2. 确认LeanCloud配置信息是否正确\n3. 检查LeanCloud控制台中的应用状态\n4. 尝试刷新页面后重新同步';
         
         alert(errorMsg);
     });
