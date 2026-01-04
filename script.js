@@ -118,6 +118,32 @@ function bindEventListeners() {
     
     // 添加映射
     document.getElementById('addMappingBtn').addEventListener('click', addMapping);
+    
+    // 商品列表搜索
+    document.getElementById('productSearchBtn').addEventListener('click', function() {
+        productSearchQuery = document.getElementById('productSearch').value;
+        updateProductList();
+    });
+    
+    // 商品列表清空搜索
+    document.getElementById('productClearSearchBtn').addEventListener('click', function() {
+        document.getElementById('productSearch').value = '';
+        productSearchQuery = '';
+        updateProductList();
+    });
+    
+    // 映射列表搜索
+    document.getElementById('mappingSearchBtn').addEventListener('click', function() {
+        mappingSearchQuery = document.getElementById('mappingSearch').value;
+        updateMappingList();
+    });
+    
+    // 映射列表清空搜索
+    document.getElementById('mappingClearSearchBtn').addEventListener('click', function() {
+        document.getElementById('mappingSearch').value = '';
+        mappingSearchQuery = '';
+        updateMappingList();
+    });
 }
 
 // 处理条码输入变化
@@ -233,6 +259,10 @@ function saveMappings() {
 // 全局变量：当前显示模式（all 或 filter）
 let currentDisplayMode = 'all';
 
+// 全局搜索变量
+let productSearchQuery = '';
+let mappingSearchQuery = '';
+
 // 更新商品列表
 function updateProductList() {
     console.log('updateProductList函数被调用，原始商品数量:', products.length);
@@ -248,6 +278,14 @@ function updateProductList() {
             const status = getExpiryStatus(product.validity);
             return status === 'danger' || status === 'expired';
         });
+    }
+    
+    // 应用搜索过滤
+    if (productSearchQuery) {
+        const query = productSearchQuery.toLowerCase();
+        displayProducts = displayProducts.filter(p => 
+            p.productName.toLowerCase().includes(query) || p.barcode.includes(query)
+        );
     }
     
     // 按到期日期排序（已过期的排前面，然后按有效期从近到远）
@@ -559,7 +597,18 @@ function updateMappingList() {
     const tbody = document.querySelector('#mappingTable tbody');
     tbody.innerHTML = '';
     
-    productMappings.forEach((mapping, index) => {
+    // 获取要显示的映射列表
+    let displayMappings = [...productMappings];
+    
+    // 应用搜索过滤
+    if (mappingSearchQuery) {
+        const query = mappingSearchQuery.toLowerCase();
+        displayMappings = displayMappings.filter(m => 
+            m.productName.toLowerCase().includes(query) || m.barcode.includes(query)
+        );
+    }
+    
+    displayMappings.forEach((mapping, index) => {
         const row = document.createElement('tr');
         
         row.innerHTML = `

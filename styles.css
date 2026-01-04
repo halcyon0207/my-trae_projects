@@ -151,6 +151,7 @@ input:focus {
     overflow-x: auto;
     max-height: 600px;
     overflow-y: auto;
+    position: relative;
 }
 
 table {
@@ -217,6 +218,35 @@ td .btn {
 .mapping-controls input {
     flex: 1;
     min-width: 200px;
+}
+
+/* 搜索控件样式 */
+.search-controls {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+    flex-wrap: wrap;
+}
+
+.search-controls input {
+    flex: 1;
+    min-width: 200px;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+/* 确保搜索控件在响应式布局下正常显示 */
+@media (max-width: 768px) {
+    .search-controls {
+        flex-direction: column;
+    }
+    
+    .search-controls input {
+        width: 100%;
+        min-width: auto;
+    }
 }
 
 /* 状态标签 */

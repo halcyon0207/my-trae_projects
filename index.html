@@ -65,6 +65,11 @@
             <!-- 商品列表 -->
             <section class="list-section">
                 <h2>商品列表</h2>
+                <div class="search-controls">
+                    <input type="text" id="productSearch" placeholder="搜索商品名称或条码">
+                    <button id="productSearchBtn" class="btn btn-secondary">搜索</button>
+                    <button id="productClearSearchBtn" class="btn btn-secondary">清空</button>
+                </div>
                 <table id="productTable">
                     <thead>
                         <tr>
@@ -89,6 +94,11 @@
             <!-- 商品条码映射管理 -->
             <section class="mapping-section">
                 <h2>条码-名称映射管理</h2>
+                <div class="search-controls">
+                    <input type="text" id="mappingSearch" placeholder="搜索商品名称或条码">
+                    <button id="mappingSearchBtn" class="btn btn-secondary">搜索</button>
+                    <button id="mappingClearSearchBtn" class="btn btn-secondary">清空</button>
+                </div>
                 <div class="mapping-controls">
                     <input type="text" id="newBarcode" placeholder="新条码">
                     <input type="text" id="newProductName" placeholder="商品名称">
