@@ -537,11 +537,7 @@ function addMapping() {
         document.getElementById('newBarcode').value = '';
         document.getElementById('newProductName').value = '';
         
-        // 自动同步到云端
-        if (APP_ID !== 'your_app_id' && APP_KEY !== 'your_app_key') {
-            console.log('自动同步映射数据到云端...');
-            realSyncData();
-        }
+        // 取消自动同步，仅通过手动点击按钮触发
         
         alert('映射保存成功！');
     }
