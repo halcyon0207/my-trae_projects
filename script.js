@@ -1021,208 +1021,304 @@ function realSyncData() {
         alert(`数据同步完成！\n共 ${totalItems} 项\n成功: ${successfulSyncCount} 项\n失败: ${failedSyncCount} 项`);
     }
     
-    // 带节流和重试的请求处理函数
-    function throttledRequest(item, processFn, delay = 1000, maxRetries = 3) {
+    // 并行处理函数
+    function processInParallel(items, processFn, maxConcurrency = 15) {
+        const results = [];
+        const running = [];
+        let index = 0;
+        
+        function runNext() {
+            if (index >= items.length) return Promise.resolve();
+            
+            const item = items[index++];
+            const promise = processFn(item).then(result => {
+                results.push(result);
+                running.splice(running.indexOf(promise), 1);
+                return runNext();
+            }).catch(error => {
+                running.splice(running.indexOf(promise), 1);
+                return runNext();
+            });
+            
+            running.push(promise);
+            return running.length >= maxConcurrency ? Promise.race(running) : runNext();
+        }
+        
+        return runNext().then(() => results);
+    }
+    
+    // 带重试的请求处理函数（优化版）
+    function requestWithRetry(item, processFn, maxRetries = 3, initialDelay = 500) {
         let retries = 0;
         
         function attemptRequest() {
-            return new Promise((resolve, reject) => {
-                setTimeout(() => {
-                    processFn(item).then(resolve).catch(error => {
-                        // 如果是429错误（请求频率过高），重试
-                        if (error.code === 429 && retries < maxRetries) {
-                            retries++;
-                            const retryDelay = delay * Math.pow(2, retries); // 指数退避
-                            console.log(`请求频率过高，${retries}秒后重试（第${retries}次重试）:`, item.barcode);
-                            setTimeout(() => {
-                                attemptRequest().then(resolve).catch(reject);
-                            }, retryDelay * 1000);
-                        } else {
-                            reject(error);
-                        }
+            return processFn(item).catch(error => {
+                // 定义需要重试的错误类型
+                const retryableErrors = [
+                    429, // 请求频率过高
+                    100, // 网络错误
+                    408, // 请求超时
+                    500, // 服务器内部错误
+                    502, // 网关错误
+                    503, // 服务不可用
+                    504  // 网关超时
+                ];
+                
+                // 检查是否需要重试
+                if ((retryableErrors.includes(error.code) || 
+                     error.message?.includes('timeout') || 
+                     error.message?.includes('Timeout')) && 
+                    retries < maxRetries) {
+                    retries++;
+                    const retryDelay = initialDelay * Math.pow(2, retries - 1); // 指数退避
+                    
+                    // 根据错误类型和重试次数调整延迟
+                    let adjustedDelay = retryDelay;
+                    if (error.code === 429) {
+                        // 对频率限制错误增加额外延迟
+                        adjustedDelay += Math.random() * 1000; // 增加随机延迟避免同时重试
+                    }
+                    
+                    // 获取批量信息用于日志
+                    const itemInfo = Array.isArray(item) ? `${item.length}项数据` : item?.barcode || '数据';
+                    console.log(`${error.code || '网络'}错误，${adjustedDelay / 1000}秒后重试（第${retries}次重试）:`, itemInfo);
+                    
+                    return new Promise(resolve => {
+                        setTimeout(() => resolve(attemptRequest()), adjustedDelay);
                     });
-                }, delay);
+                }
+                
+                // 对于非重试错误，更新失败计数
+                if (error.code !== 401 && error.code !== 403) { // 不计算权限错误
+                    failedSyncCount++;
+                    totalSyncCount++;
+                    updateSyncProgress();
+                }
+                
+                throw error;
             });
         }
         
         return attemptRequest();
     }
     
-    // 同步商品数据
-    function syncProducts() {
-        return new Promise((resolve) => {
-            if (products.length === 0) {
-                resolve();
-                return;
-            }
-            
-            console.log('开始同步商品数据，共', products.length, '条');
-            
-            let completed = 0;
-            const delayBetweenRequests = 500; // 每次请求间隔500毫秒
-            
-            // 串行处理商品数据，避免请求频率过高
-            function processNextProduct(index = 0) {
-                if (index >= products.length) {
-                    resolve();
-                    return;
-                }
+    // 批量查询现有记录函数（支持分批查询）
+    async function getExistingRecords(type, items, fieldName = 'barcode') {
+        const AVClass = AV.Object.extend(type);
+        const QUERY_BATCH_SIZE = 100;
+        
+        // 提取所有要查询的值
+        const values = items.map(item => item[fieldName]);
+        if (values.length === 0) return new Map();
+        
+        // 创建映射表
+        const recordMap = new Map();
+        
+        try {
+            // 分批查询
+            for (let i = 0; i < values.length; i += QUERY_BATCH_SIZE) {
+                const batchValues = values.slice(i, i + QUERY_BATCH_SIZE);
+                const query = new AV.Query(AVClass);
                 
-                const product = products[index];
-                const Product = AV.Object.extend('Product');
-                const query = new AV.Query(Product);
+                // 批量查询当前批次
+                query.containedIn(fieldName, batchValues);
+                const batchRecords = await query.find();
                 
-                // 创建一个不包含保留字段的产品数据副本
-                const productData = { ...product };
-                delete productData.id; // 移除本地ID字段
-                delete productData.createdAt; // 确保移除LeanCloud保留字段
-                delete productData.updatedAt; // 确保移除LeanCloud保留字段
-                
-                // 处理单个商品的函数
-                function processProduct() {
-                    return new Promise((resolve, reject) => {
-                        // 先检查是否已存在相同条码的商品
-                        query.equalTo('barcode', productData.barcode);
-                        query.first().then(existingProduct => {
-                            let avProduct;
-                            if (existingProduct) {
-                                // 如果存在，更新现有记录
-                                avProduct = existingProduct;
-                                console.log('更新现有商品:', productData.barcode);
-                            } else {
-                                // 如果不存在，创建新记录
-                                avProduct = new Product();
-                                console.log('创建新商品:', productData.barcode);
-                            }
-                            
-                            // 设置产品数据到AV对象
-                            avProduct.set('barcode', productData.barcode);
-                            avProduct.set('productName', productData.productName);
-                            avProduct.set('type', productData.type);
-                            avProduct.set('scanDate', productData.scanDate);
-                            avProduct.set('productionDate', productData.productionDate);
-                            avProduct.set('shelfLife', productData.shelfLife);
-                            avProduct.set('validity', productData.validity);
-                            
-                            // 保存到 LeanCloud
-                            return avProduct.save();
-                        }).then(resolve).catch(reject);
-                    });
-                }
-                
-                // 使用节流处理请求
-                throttledRequest(product, processProduct, delayBetweenRequests / 1000).then(
-                    () => {
-                        console.log('商品数据同步成功:', productData.barcode);
-                        successfulSyncCount++;
-                        totalSyncCount++;
-                        updateSyncProgress();
-                    },
-                    error => {
-                        console.error('商品数据同步失败:', productData.barcode, error);
-                        failedSyncCount++;
-                        totalSyncCount++;
-                        updateSyncProgress();
-                    }
-                ).finally(() => {
-                    completed++;
-                    // 处理下一个商品
-                    processNextProduct(index + 1);
+                // 添加到映射表
+                batchRecords.forEach(record => {
+                    const value = record.get(fieldName);
+                    recordMap.set(value, record);
                 });
             }
             
-            // 开始处理第一个商品
-            processNextProduct();
-        });
+            console.log(`分批查询${type}完成，共找到${recordMap.size}条记录`);
+            return recordMap;
+        } catch (error) {
+            console.error(`批量查询${type}失败:`, error);
+            // 如果批量查询失败，返回空映射，将使用逐个查询作为回退
+            return new Map();
+        }
+    }
+    
+    // 批量大小和并发配置（动态调整）
+    function getOptimalBatchSize(totalItems) {
+        if (totalItems < 100) return 50;
+        if (totalItems < 1000) return 100;
+        return 200; // 最大不超过200，避免LeanCloud API限制
+    }
+    
+    function getOptimalConcurrency(totalItems, batchSize) {
+        const totalBatches = Math.ceil(totalItems / batchSize);
+        if (totalItems < 100) return Math.min(3, totalBatches);
+        if (totalItems < 1000) return Math.min(8, totalBatches);
+        return Math.min(12, totalBatches); // 最大并发12，避免系统过载
+    }
+    
+    // 并行批量处理函数
+    async function processBatchesInParallel(items, processBatchFn, batchSize = null, maxConcurrency = null) {
+        // 动态计算批处理大小和并发数
+        const optimalBatchSize = batchSize || getOptimalBatchSize(items.length);
+        const optimalConcurrency = maxConcurrency || getOptimalConcurrency(items.length, optimalBatchSize);
+        
+        const batches = [];
+        // 创建批次
+        for (let i = 0; i < items.length; i += optimalBatchSize) {
+            batches.push(items.slice(i, i + optimalBatchSize));
+        }
+        
+        if (batches.length === 0) return;
+        
+        console.log(`开始并行处理${batches.length}个批次，每批${optimalBatchSize}条，最大并发${optimalConcurrency}`);
+        
+        const results = [];
+        const running = [];
+        let index = 0;
+        
+        function runNext() {
+            if (index >= batches.length) return Promise.resolve();
+            const batch = batches[index++];
+            const promise = processBatchFn(batch).then(result => {
+                results.push(result);
+                running.splice(running.indexOf(promise), 1);
+                return runNext();
+            }).catch(error => {
+                console.error(`处理批次${index - 1}失败:`, error);
+                running.splice(running.indexOf(promise), 1);
+                return runNext();
+            });
+            
+            running.push(promise);
+            return running.length >= maxConcurrency ? Promise.race(running) : runNext();
+        }
+        
+        await runNext();
+        return results;
+    }
+    
+    // 同步商品数据
+    async function syncProducts() {
+        if (products.length === 0) return;
+        
+        console.log('开始同步商品数据，共', products.length, '条');
+        
+        // 批量查询现有商品
+        const existingProductsMap = await getExistingRecords('Product', products);
+        console.log('批量查询到的现有商品数量:', existingProductsMap.size);
+        
+        // 处理单个批次的商品
+        async function processProductBatch(batchProducts) {
+            const batchAVObjects = [];
+            
+            // 准备当前批次的AV对象
+            batchProducts.forEach(product => {
+                const Product = AV.Object.extend('Product');
+                const productData = { ...product };
+                delete productData.id;
+                delete productData.createdAt;
+                delete productData.updatedAt;
+                
+                let avProduct;
+                
+                // 检查是否已存在相同条码的商品
+                const existingProduct = existingProductsMap.get(productData.barcode);
+                if (existingProduct) {
+                    // 如果存在，更新现有记录
+                    avProduct = existingProduct;
+                    console.log('更新现有商品:', productData.barcode);
+                } else {
+                    // 如果不存在，创建新记录
+                    avProduct = new Product();
+                    console.log('创建新商品:', productData.barcode);
+                }
+                
+                // 设置产品数据到AV对象
+                avProduct.set('barcode', productData.barcode);
+                avProduct.set('productName', productData.productName);
+                avProduct.set('type', productData.type);
+                avProduct.set('scanDate', productData.scanDate);
+                avProduct.set('productionDate', productData.productionDate);
+                avProduct.set('shelfLife', productData.shelfLife);
+                avProduct.set('validity', productData.validity);
+                
+                batchAVObjects.push(avProduct);
+            });
+            
+            // 使用批量操作保存当前批次
+            await requestWithRetry(batchAVObjects, async () => {
+                await AV.Object.saveAll(batchAVObjects);
+                
+                // 更新进度
+                successfulSyncCount += batchAVObjects.length;
+                totalSyncCount += batchAVObjects.length;
+                updateSyncProgress();
+            }, 3, 500);
+        }
+        
+        // 并行处理商品批次（自动调整批处理大小和并发数）
+        await processBatchesInParallel(products, processProductBatch);
     }
     
     // 同步映射数据
-    function syncMappings() {
-        return new Promise((resolve) => {
-            if (productMappings.length === 0) {
-                resolve();
-                return;
-            }
+    async function syncMappings() {
+        if (productMappings.length === 0) return;
+        
+        console.log('开始同步映射数据，共', productMappings.length, '条');
+        
+        // 批量查询现有映射
+        const existingMappingsMap = await getExistingRecords('Mapping', productMappings);
+        console.log('批量查询到的现有映射数量:', existingMappingsMap.size);
+        
+        // 处理单个批次的映射
+        async function processMappingBatch(batchMappings) {
+            const batchAVObjects = [];
             
-            console.log('开始同步映射数据，共', productMappings.length, '条');
-            
-            let completed = 0;
-            const delayBetweenRequests = 500; // 每次请求间隔500毫秒
-            
-            // 串行处理映射数据，避免请求频率过高
-            function processNextMapping(index = 0) {
-                if (index >= productMappings.length) {
-                    resolve();
-                    return;
-                }
-                
-                const mapping = productMappings[index];
+            // 准备当前批次的AV对象
+            batchMappings.forEach(mapping => {
                 const Mapping = AV.Object.extend('Mapping');
-                const query = new AV.Query(Mapping);
-                
-                // 创建一个不包含保留字段的映射数据副本
                 const mappingData = { ...mapping };
-                delete mappingData.id; // 移除本地ID字段
-                delete mappingData.createdAt; // 确保移除LeanCloud保留字段
-                delete mappingData.updatedAt; // 确保移除LeanCloud保留字段
+                delete mappingData.id;
+                delete mappingData.createdAt;
+                delete mappingData.updatedAt;
                 
-                // 处理单个映射的函数
-                function processMapping() {
-                    return new Promise((resolve, reject) => {
-                        // 先检查是否已存在相同条码的映射
-                        query.equalTo('barcode', mappingData.barcode);
-                        query.first().then(existingMapping => {
-                            let avMapping;
-                            if (existingMapping) {
-                                // 如果存在，更新现有记录
-                                avMapping = existingMapping;
-                                console.log('更新现有映射:', mappingData.barcode);
-                            } else {
-                                // 如果不存在，创建新记录
-                                avMapping = new Mapping();
-                                console.log('创建新映射:', mappingData.barcode);
-                            }
-                            
-                            avMapping.set('barcode', mappingData.barcode);
-                            avMapping.set('productName', mappingData.productName);
-                            
-                            // 保存到 LeanCloud
-                            return avMapping.save();
-                        }).then(resolve).catch(reject);
-                    });
+                let avMapping;
+                
+                // 检查是否已存在相同条码的映射
+                const existingMapping = existingMappingsMap.get(mappingData.barcode);
+                if (existingMapping) {
+                    // 如果存在，更新现有记录
+                    avMapping = existingMapping;
+                    console.log('更新现有映射:', mappingData.barcode);
+                } else {
+                    // 如果不存在，创建新记录
+                    avMapping = new Mapping();
+                    console.log('创建新映射:', mappingData.barcode);
                 }
                 
-                throttledRequest(mapping, processMapping, delayBetweenRequests / 1000).then(
-                    () => {
-                        console.log('映射数据同步成功:', mappingData.barcode);
-                        successfulSyncCount++;
-                        totalSyncCount++;
-                        updateSyncProgress();
-                    },
-                    error => {
-                        console.error('映射数据同步失败:', mappingData.barcode, error);
-                        failedSyncCount++;
-                        totalSyncCount++;
-                        updateSyncProgress();
-                    }
-                ).finally(() => {
-                    completed++;
-                    // 处理下一个映射
-                    processNextMapping(index + 1);
-                });
-            }
+                avMapping.set('barcode', mappingData.barcode);
+                avMapping.set('productName', mappingData.productName);
+                
+                batchAVObjects.push(avMapping);
+            });
             
-            // 开始处理第一个映射
-            processNextMapping();
-        });
+            // 使用批量操作保存当前批次
+            await requestWithRetry(batchAVObjects, async () => {
+                await AV.Object.saveAll(batchAVObjects);
+                
+                // 更新进度
+                successfulSyncCount += batchAVObjects.length;
+                totalSyncCount += batchAVObjects.length;
+                updateSyncProgress();
+            }, 3, 500);
+        }
+        
+        // 并行处理映射批次（自动调整批处理大小和并发数）
+        await processBatchesInParallel(productMappings, processMappingBatch);
     }
     
     // 执行同步
     try {
-        // 先同步商品数据，再同步映射数据
-        syncProducts().then(() => {
-            return syncMappings();
-        }).then(() => {
+        // 并行同步商品和映射数据
+        Promise.all([syncProducts(), syncMappings()]).then(() => {
             // 同步完成
             finishSync();
         }).catch(error => {
@@ -1300,13 +1396,48 @@ window.fetchLatestDataFromCloud = function() {
     fetchNotification.textContent = '正在从云端获取最新数据...';
     document.body.appendChild(fetchNotification);
     
+    // 分批获取数据的通用函数
+    function fetchDataInBatches(AVClass, queryLimit = 1000) {
+        return new Promise(async (resolve, reject) => {
+            try {
+                const query = new AV.Query(AVClass);
+                let allResults = [];
+                let skip = 0;
+                let hasMore = true;
+                
+                // 先获取总数
+                const total = await query.count();
+                console.log(`开始分批获取${AVClass.className}数据，共${total}条，每批${queryLimit}条`);
+                
+                // 分批获取数据
+                while (hasMore) {
+                    query.limit(queryLimit);
+                    query.skip(skip);
+                    
+                    const results = await query.find();
+                    allResults = allResults.concat(results);
+                    
+                    console.log(`已获取${allResults.length}/${total}条${AVClass.className}数据`);
+                    
+                    skip += queryLimit;
+                    hasMore = skip < total && results.length > 0;
+                }
+                
+                resolve(allResults);
+            } catch (error) {
+                console.error(`分批获取${AVClass.className}数据失败:`, error);
+                reject(error);
+            }
+        });
+    }
+    
     // 获取商品数据
     function fetchProducts() {
-        return new Promise((resolve, reject) => {
-            const Product = AV.Object.extend('Product');
-            const query = new AV.Query(Product);
-            
-            query.find().then(results => {
+        return new Promise(async (resolve, reject) => {
+            try {
+                const Product = AV.Object.extend('Product');
+                const results = await fetchDataInBatches(Product);
+                
                 console.log('成功获取到商品数据:', results.length, '条');
                 const cloudProducts = results.map(item => {
                     return {
@@ -1323,20 +1454,20 @@ window.fetchLatestDataFromCloud = function() {
                     };
                 });
                 resolve(cloudProducts);
-            }).catch(error => {
+            } catch (error) {
                 console.error('获取商品数据失败:', error);
                 reject(error);
-            });
+            }
         });
     }
     
     // 获取映射数据
     function fetchMappings() {
-        return new Promise((resolve, reject) => {
-            const Mapping = AV.Object.extend('Mapping');
-            const query = new AV.Query(Mapping);
-            
-            query.find().then(results => {
+        return new Promise(async (resolve, reject) => {
+            try {
+                const Mapping = AV.Object.extend('Mapping');
+                const results = await fetchDataInBatches(Mapping);
+                
                 console.log('成功获取到映射数据:', results.length, '条');
                 const cloudMappings = results.map(item => {
                     return {
@@ -1348,10 +1479,10 @@ window.fetchLatestDataFromCloud = function() {
                     };
                 });
                 resolve(cloudMappings);
-            }).catch(error => {
+            } catch (error) {
                 console.error('获取映射数据失败:', error);
                 reject(error);
-            });
+            }
         });
     }
     
@@ -1386,11 +1517,9 @@ window.fetchLatestDataFromCloud = function() {
         alert(`成功从云端获取最新数据！\n商品: ${cloudProducts.length} 条\n映射: ${cloudMappings.length} 条`);
     }
     
-    // 执行数据获取
-    fetchProducts().then(cloudProducts => {
-        return fetchMappings().then(cloudMappings => {
-            mergeData(cloudProducts, cloudMappings);
-        });
+    // 执行数据获取（并行获取商品和映射数据）
+    Promise.all([fetchProducts(), fetchMappings()]).then(([cloudProducts, cloudMappings]) => {
+        mergeData(cloudProducts, cloudMappings);
     }).catch(error => {
         console.error('数据获取过程中发生错误:', error);
         fetchNotification.textContent = '数据获取发生错误！';
