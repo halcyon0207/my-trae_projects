@@ -101,7 +101,11 @@ function startScanner() {
         return;
     }
 
-    html5QrCode = new Html5Qrcode('reader');
+    // 优先启用浏览器原生 BarcodeDetector，比纯 JS 解码快数倍
+    html5QrCode = new Html5Qrcode('reader', {
+        verbose: false,
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+    });
 
     Html5Qrcode.getCameras().then(function(cameras) {
         if (cameras && cameras.length) {
@@ -114,7 +118,18 @@ function startScanner() {
 
             html5QrCode.start(
                 cameraId,
-                { fps: 10, qrbox: { width: 250, height: 250 } },
+                {
+                    fps: 25,
+                    disableFlip: true,
+                    aspectRatio: 1.7777778,
+                    // 一维条形码是横向长条，这里用“宽扁”识别区，方框会切掉条码
+                    qrbox: function(w, h) {
+                        return {
+                            width: Math.floor(w * 0.9),
+                            height: Math.floor(h * 0.45)
+                        };
+                    }
+                },
                 function(decodedText) {
                     const barcodeInput = document.getElementById('barcode');
                     barcodeInput.value = decodedText;
