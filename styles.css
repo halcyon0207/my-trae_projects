@@ -365,3 +365,67 @@ td .btn {
         padding: 8px;
     }
 }
+
+/* ===== 手机端增强（触屏操作友好） ===== */
+@media (max-width: 768px) {
+    header {
+        padding: 15px 10px;
+        margin-bottom: 15px;
+    }
+
+    header h1 {
+        font-size: 1.4rem;
+    }
+
+    section h2 {
+        font-size: 1.15rem;
+    }
+
+    /* 输入框放大，避免 iOS 自动缩放 */
+    input[type="text"],
+    input[type="number"],
+    input[type="date"] {
+        font-size: 16px;
+        padding: 12px;
+    }
+
+    /* 功能按钮加大点击区域 */
+    .controls .btn,
+    .form-section .btn {
+        padding: 14px 20px;
+        font-size: 15px;
+        margin-bottom: 8px;
+    }
+
+    /* 表格内操作按钮加大，方便手指点击 */
+    td .btn {
+        padding: 7px 10px;
+        font-size: 12px;
+        min-width: 48px;
+        margin-bottom: 4px;
+    }
+
+    .status {
+        font-size: 11px;
+        padding: 4px 8px;
+        min-width: 46px;
+    }
+
+    /* 列表滚动区域加高，减少来回滚动 */
+    .list-section .scrollable-content,
+    .mapping-section .scrollable-content {
+        max-height: 380px;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .chart-section {
+        height: 300px;
+        padding: 12px;
+        margin-bottom: 20px;
+    }
+
+    .list-section,
+    .mapping-section {
+        margin-top: 20px;
+    }
+}
