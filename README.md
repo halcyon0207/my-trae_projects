@@ -2,6 +2,8 @@
 
 一个简单实用的商品到期提醒应用，帮助您管理商品的保质期信息。
 
+> 云端存储已从 LeanCloud 迁移到 **腾讯云开发 CloudBase**（LeanCloud 将于 2027 年 1 月 12 日停止对外服务）。
+
 ## 功能特点
 
 ### 1. 商品管理
@@ -33,8 +35,8 @@
 - **清空数据**：一键清空所有商品和映射数据
 
 ### 6. 数据同步
-- 集成LeanCloud实现数据云同步功能
-- 需要配置LeanCloud账号信息
+- 集成腾讯云开发 CloudBase 实现数据云同步功能
+- 需要配置 CloudBase 环境 ID（详见下文「配置 CloudBase 数据同步」）
 
 ## 使用方法
 
@@ -54,19 +56,36 @@
 - **导出**：点击"导出CSV"按钮，系统会生成包含所有商品数据的CSV文件
 - **导入**：点击"导入CSV"按钮，选择要导入的CSV文件
 
-### 4. 配置LeanCloud数据同步
-1. 注册LeanCloud账号并创建应用
-2. 在 `script.js` 文件中配置：
+### 4. 配置 CloudBase 数据同步
+
+> 注册和配置的全流程约 10 分钟，个人使用有免费额度。
+
+1. 打开 https://tcb.cloud.tencent.com/ ，注册腾讯云账号并完成**个人实名认证**
+2. 创建一个**环境**，记下生成的**环境 ID**（形如 `xxx-1a2b3c`）
+3. 控制台「身份认证」中开启 **匿名登录**
+4. 新建两个集合：`Product`（商品）与 `Mapping`（条码映射）
+5. 把两个集合的权限设置为 **「所有用户可读写」**
+   - 默认权限是「仅创建者可读写」，匿名登录下每台设备算一个独立用户，会导致换设备看不到数据
+6. 在 `script.js` 中把 `ENV_ID` 替换为你的环境 ID：
    ```javascript
-   const APP_ID = 'your_app_id'; // 替换为你的App ID
-   const APP_KEY = 'your_app_key'; // 替换为你的App Key
-   AV.init({
-       appId: APP_ID,
-       appKey: APP_KEY,
-       serverURL: 'https://your_server_url.leancloud.cn' // 替换为你的服务器地址
-   });
+   const ENV_ID = 'your-env-id'; // 替换为你的 CloudBase 环境 ID
    ```
-3. 点击"同步数据"按钮进行数据同步
+7. 打开页面后，点击「同步数据」把本地数据上传到云端，或点击「获取最新数据」从云端拉取
+
+### 5. 从 LeanCloud 迁移已有数据
+
+1. 在 LeanCloud 控制台「数据存储 → 导入导出」中，把 `Product` / `Mapping` 导出为 JSON
+2. 在 CloudBase 控制台「数据库」中选择对应集合 → 「导入」，上传 JSON 文件
+3. 若字段名不一致，按下面的规则调整后再导入：
+
+| LeanCloud 字段 | CloudBase 字段 | 说明 |
+|---|---|---|
+| `objectId` | `_id` | 文档唯一 ID |
+| `createdAt` | `_createTime` | 创建时间 |
+| `updatedAt` | `_updateTime` | 更新时间 |
+| `barcode` / `productName` 等业务字段 | 保持不变 | — |
+
+> 提示：如果数据量很少，也可以直接在浏览器里点「获取最新数据」前，先手动把数据敲进新系统；或者先导出 CSV，在 CloudBase 里重新录入后用「同步数据」上传。
 
 ## 项目结构
 
@@ -82,15 +101,16 @@ product-expiry-reminder/
 
 - **前端框架**：纯HTML/CSS/JavaScript，无框架依赖
 - **图表库**：Chart.js
-- **云存储**：LeanCloud（可选）
+- **云存储**：腾讯云开发 CloudBase（可选）
 - **本地存储**：localStorage
 
 ## 注意事项
 
 1. 请确保在现代浏览器中使用（推荐Chrome、Firefox、Edge等）
 2. 条码映射功能需要提前设置才能自动带出商品名称
-3. 首次使用时，需要配置LeanCloud信息才能使用数据同步功能
+3. 首次使用时，需要在 `script.js` 中配置 CloudBase 环境 ID 才能使用数据同步功能
 4. 导入CSV文件时，请确保格式与导出的CSV文件格式一致
+5. 安全问题：`ENV_ID` 等配置会随代码公开，请勿把云平台的密钥（SecretId / SecretKey）写进前端代码
 
 ## 浏览器兼容性
 
@@ -114,15 +134,20 @@ product-expiry-reminder/
 - 确保条码输入正确，无多余空格
 
 ### 数据同步失败
-- 检查LeanCloud App ID和App Key是否配置正确
+- 检查 `script.js` 中的 `ENV_ID` 是否已替换为你的 CloudBase 环境 ID
+- 检查 CloudBase 控制台是否已开启「匿名登录」
+- 检查 `Product` / `Mapping` 两个集合的权限是否设置为「所有用户可读写」
+- 浏览器控制台按 F12 查看具体报错信息
 - 确保网络连接正常
-- 检查LeanCloud控制台中的应用状态
 
 ### 图表不显示
 - 确保浏览器支持Canvas元素
 - 检查是否有JavaScript错误（可通过浏览器开发者工具查看）
 
 ## 更新日志
+
+### v1.1.0
+- 云端存储从 LeanCloud 迁移到腾讯云开发 CloudBase
 
 ### v1.0.0
 - 初始版本发布
