@@ -48,12 +48,21 @@ let mappingSearchQuery = '';
 // 图表实例
 let chart;
 
+// 摄像头扫码实例
+let html5QrCode = null;
+
 /* ===================== 2. 通用提示 ===================== */
 function showToast(message, background, duration) {
     background = background || '#2196F3';
     duration = duration || 3000;
 
+    // 新提示出现时先清理旧的，避免“正在获取”这类长提示一直挂着
+    document.querySelectorAll('.toast-notification').forEach(function(el) {
+        if (el.parentNode) el.parentNode.removeChild(el);
+    });
+
     const notification = document.createElement('div');
+    notification.className = 'toast-notification';
     notification.style.position = 'fixed';
     notification.style.top = '20px';
     notification.style.left = '50%';
@@ -74,6 +83,79 @@ function showToast(message, background, duration) {
             document.body.removeChild(notification);
         }
     }, duration);
+}
+
+/* ===================== 摄像头扫码 ===================== */
+function startScanner() {
+    const modal = document.getElementById('scannerModal');
+    if (!modal) return;
+
+    modal.style.display = 'flex';
+
+    const reader = document.getElementById('reader');
+    if (reader) reader.innerHTML = '';
+
+    if (typeof Html5Qrcode === 'undefined') {
+        showToast('扫码库未加载，请检查网络', '#ff9800');
+        stopScanner();
+        return;
+    }
+
+    html5QrCode = new Html5Qrcode('reader');
+
+    Html5Qrcode.getCameras().then(function(cameras) {
+        if (cameras && cameras.length) {
+            // 优先选择后置摄像头
+            let cameraId = cameras[cameras.length - 1].id;
+            const backCamera = cameras.find(function(c) {
+                return /back|rear|environment/i.test(c.label);
+            });
+            if (backCamera) cameraId = backCamera.id;
+
+            html5QrCode.start(
+                cameraId,
+                { fps: 10, qrbox: { width: 250, height: 250 } },
+                function(decodedText) {
+                    const barcodeInput = document.getElementById('barcode');
+                    barcodeInput.value = decodedText;
+                    handleBarcodeChange();
+                    showToast('识别成功：' + decodedText, '#4CAF50', 2000);
+                    stopScanner();
+                },
+                function() {
+                    // 帧解析中的临时错误，静默忽略
+                }
+            ).catch(function(err) {
+                console.error('启动摄像头失败:', err);
+                showToast('启动摄像头失败：' + (err.message || err), '#f44336');
+                stopScanner();
+            });
+        } else {
+            showToast('未检测到摄像头', '#ff9800');
+            stopScanner();
+        }
+    }).catch(function(err) {
+        console.error('获取摄像头失败:', err);
+        showToast('无法访问摄像头，请确认已授权', '#f44336');
+        stopScanner();
+    });
+}
+
+function stopScanner() {
+    const modal = document.getElementById('scannerModal');
+    if (modal) modal.style.display = 'none';
+
+    if (!html5QrCode) return;
+
+    var scanner = html5QrCode;
+    html5QrCode = null;
+    try {
+        scanner.stop().then(function() {
+            scanner.clear();
+        }).catch(function() {});
+    } catch (e) {
+        // 忽略停止扫码时的异常
+    }
 }
 
 /* ============ 3. 存储后端：GitHub（GitHub Pages 版本使用） ============
@@ -325,6 +407,20 @@ function bindEventListeners() {
 
     // 条码输入变化
     document.getElementById('barcode').addEventListener('input', handleBarcodeChange);
+
+    // 摄像头扫码
+    const scanBtn = document.getElementById('scanBtn');
+    if (scanBtn) scanBtn.addEventListener('click', startScanner);
+    const stopScanBtn = document.getElementById('stopScanBtn');
+    if (stopScanBtn) stopScanBtn.addEventListener('click', stopScanner);
+
+    // 点击遮罩关闭扫码弹窗
+    const scannerModal = document.getElementById('scannerModal');
+    if (scannerModal) {
+        scannerModal.addEventListener('click', function(e) {
+            if (e.target === scannerModal) stopScanner();
+        });
+    }
 
     // 生产日期或保质期变化时自动计算到期日期
     document.getElementById('productionDate').addEventListener('change', calculateExpiryDate);
