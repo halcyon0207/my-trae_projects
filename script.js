@@ -177,6 +177,88 @@ async function toggleTorch() {
     }
 }
 
+/* ---- 对焦控制 ----
+ * 手机默认的对焦策略在镜头贴近条码时会反复拉风箱（跑焦），图像一直糊着，
+ * 再好的识别算法也读不出来。这里显式指定对焦模式，并开放手动重新对焦。 */
+let focusRestoreTimer = null;
+
+// 按指定模式设置对焦。设备不支持该模式时返回 false，交给调用方决定后续动作
+function applyFocusConstraints(mode) {
+    const track = getVideoTrack();
+    if (!track || typeof track.applyConstraints !== 'function') return Promise.resolve(false);
+
+    let caps = {};
+    try { caps = track.getCapabilities ? (track.getCapabilities() || {}) : {}; } catch (e) { return Promise.resolve(false); }
+
+    const modes = caps.focusMode || [];
+    if (modes.indexOf(mode) === -1) return Promise.resolve(false);
+
+    // 用 advanced 提交，满足不了的会被忽略而不会整体报错；
+    // 顺便带上补光灯状态，免得改对焦时把灯关掉
+    const advanced = [{ focusMode: mode }];
+    if (caps.torch) advanced.push({ torch: scannerTorchOn });
+
+    return track.applyConstraints({ advanced: advanced })
+        .then(function() { return true; })
+        .catch(function() { return false; });
+}
+
+// 手动重新对焦：先单次对焦让镜头立刻锁上，再交回连续对焦。
+// 一直锁着单次对焦会锁死在错误的焦距上，反而更糟
+function refocusCamera(silent) {
+    const track = getVideoTrack();
+    if (!track || typeof track.getCapabilities !== 'function') return;
+
+    let caps = {};
+    try { caps = track.getCapabilities() || {}; } catch (e) { return; }
+    const modes = caps.focusMode || [];
+    if (modes.indexOf('single-shot') === -1 && modes.indexOf('continuous') === -1) return;
+
+    if (focusRestoreTimer) { clearTimeout(focusRestoreTimer); focusRestoreTimer = null; }
+
+    const useSingle = modes.indexOf('single-shot') !== -1;
+    applyFocusConstraints(useSingle ? 'single-shot' : 'continuous').then(function(ok) {
+        if (!ok) return;
+        if (!silent) showToast('正在重新对焦…', '#2196F3', 1200);
+        if (!useSingle) return;
+        focusRestoreTimer = setTimeout(function() {
+            focusRestoreTimer = null;
+            applyFocusConstraints('continuous');
+        }, 1500);
+    });
+}
+
+// 摄像头启动后调用。设备不暴露对焦控制时（例如 iOS Safari）直接跳过，
+// 这种情况只能靠保持合适的拍摄距离来避免跑焦
+function setupFocus() {
+    const track = getVideoTrack();
+    if (!track || typeof track.getCapabilities !== 'function') return;
+
+    let caps = {};
+    try { caps = track.getCapabilities() || {}; } catch (e) { return; }
+    const modes = caps.focusMode || [];
+    if (!modes.length) return;
+
+    const refocusBtn = document.getElementById('refocusBtn');
+    if (refocusBtn) {
+        refocusBtn.style.display = 'inline-block';
+        if (refocusBtn.dataset.bound !== '1') {
+            refocusBtn.dataset.bound = '1';
+            refocusBtn.addEventListener('click', function() { refocusCamera(false); });
+        }
+    }
+
+    // 点画面就能重新对焦，比让用户去找按钮自然
+    const reader = document.getElementById('reader');
+    if (reader && reader.dataset.focusBound !== '1') {
+        reader.dataset.focusBound = '1';
+        reader.addEventListener('click', function() { refocusCamera(false); });
+    }
+
+    // 部分机型默认是单次对焦，会锁死在错的焦距上，这里显式要求连续对焦
+    applyFocusConstraints('continuous');
+}
+
 function startScanner() {
     const modal = document.getElementById('scannerModal');
     if (!modal) return;
@@ -191,6 +273,10 @@ function startScanner() {
         torchBtn.style.display = 'none';
         torchBtn.textContent = '开灯';
     }
+    // 支持对焦控制的设备会在 setupFocus() 里重新显示
+    const refocusBtn = document.getElementById('refocusBtn');
+    if (refocusBtn) refocusBtn.style.display = 'none';
+    if (focusRestoreTimer) { clearTimeout(focusRestoreTimer); focusRestoreTimer = null; }
     scannerTorchOn = false;
 
     if (typeof Html5Qrcode === 'undefined') {
@@ -226,7 +312,9 @@ function startScanner() {
         html5QrCode.start(
             cameraId,
             {
-                fps: 25,
+                // 用 15fps 而不是更高的 25fps：暗处下高帧率逼着相机用短曝光、拉高 ISO，
+                // 噪点变多反而更难合焦。15 次/秒对条码识别完全够用
+                fps: 15,
                 disableFlip: true,
                 aspectRatio: 1.7777778,
                 // 一维条形码是横向长条，这里用“宽扁”识别区，方框会切掉条码
@@ -257,6 +345,7 @@ function startScanner() {
             }
         ).then(function() {
             setupTorch();
+            setupFocus();
         }).catch(function(err) {
             console.error('启动摄像头失败:', err);
             showToast('启动摄像头失败：' + (err.message || err), '#f44336');
@@ -274,6 +363,8 @@ function stopScanner() {
     if (modal) modal.style.display = 'none';
 
     scannerTorchOn = false;
+    // 关掉弹窗后摄像头就停了，别让恢复连续对焦的定时器再动已失效的轨道
+    if (focusRestoreTimer) { clearTimeout(focusRestoreTimer); focusRestoreTimer = null; }
 
     if (!html5QrCode) return;
 

@@ -145,8 +145,9 @@
         <div class="scanner-content">
             <h3>扫描商品条码</h3>
             <div id="reader"></div>
-            <p class="scanner-hint">把条码横着放进亮框、尽量贴近并填满框的宽度，识别最快</p>
+            <p class="scanner-hint">把条码横着放进亮框，镜头离条码 10~15 厘米最清楚（贴太近反而对不上焦）<br>对不准时，点一下画面或按「重新对焦」</p>
             <div class="scanner-actions">
+                <button type="button" id="refocusBtn" class="btn btn-secondary" style="display: none;">重新对焦</button>
                 <button type="button" id="torchBtn" class="btn btn-info" style="display: none;">开灯</button>
                 <button type="button" id="stopScanBtn" class="btn btn-danger">取消扫描</button>
             </div>
