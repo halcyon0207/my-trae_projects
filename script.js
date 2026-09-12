@@ -85,7 +85,98 @@ function showToast(message, background, duration) {
     }, duration);
 }
 
-/* ===================== 摄像头扫码 ===================== */
+/* ===================== 2.1 日期工具 ===================== */
+
+// 把 'YYYY-MM-DD' 解析成“本地时区”的当天 0 点。
+// 直接 new Date('2026-09-12') 是按 UTC 解析的，在国内会差一天。
+function parseDateLocal(value) {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(value || '').trim());
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return isNaN(d.getTime()) ? null : d;
+}
+
+// 输出 'YYYY-MM-DD'（本地时区）。不能用 toISOString，同样会偏一天。
+function formatDateLocal(date) {
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return date.getFullYear() + '-' + m + '-' + d;
+}
+
+function todayLocal() {
+    return formatDateLocal(new Date());
+}
+
+// 加 N 个月。1月31日 + 1个月会滚到 3 月，这里收敛到当月最后一天
+function addMonthsClamped(date, months) {
+    const day = date.getDate();
+    const target = new Date(date.getFullYear(), date.getMonth() + months, 1);
+    const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+    target.setDate(Math.min(day, lastDay));
+    return target;
+}
+
+/* ===================== 2.2 摄像头扫码 ===================== */
+
+let scannerTorchOn = false;
+
+// 只解零售商品常见的条码格式。ZXing 每帧少试一堆格式，速度提升很明显
+function retailBarcodeFormats() {
+    const F = typeof Html5QrcodeSupportedFormats !== 'undefined' ? Html5QrcodeSupportedFormats : null;
+    if (!F) return null;
+    return [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E,
+            F.CODE_128, F.CODE_39, F.ITF, F.CODABAR,
+            F.QR_CODE].filter(function(v) { return v !== undefined; });
+}
+
+// 优先选择后置摄像头
+function pickBackCameraId(cameras) {
+    const back = cameras.find(function(c) {
+        return /back|rear|environment|后置|背面/i.test(c.label || '');
+    });
+    return back ? back.id : cameras[cameras.length - 1].id;
+}
+
+function getVideoTrack() {
+    const video = document.querySelector('#reader video');
+    if (!video || !video.srcObject) return null;
+    const tracks = video.srcObject.getVideoTracks ? video.srcObject.getVideoTracks() : [];
+    return tracks && tracks.length ? tracks[0] : null;
+}
+
+// 只有带补光灯的设备才显示“开灯”按钮
+function setupTorch() {
+    const torchBtn = document.getElementById('torchBtn');
+    if (!torchBtn) return;
+
+    const track = getVideoTrack();
+    if (!track || typeof track.getCapabilities !== 'function') return;
+
+    let caps = {};
+    try { caps = track.getCapabilities() || {}; } catch (e) { return; }
+    if (caps.torch) torchBtn.style.display = 'inline-block';
+}
+
+// 超市、仓库光线暗的时候开补光灯，识别率提升很大
+async function toggleTorch() {
+    const torchBtn = document.getElementById('torchBtn');
+    const track = getVideoTrack();
+    if (!track) return;
+
+    scannerTorchOn = !scannerTorchOn;
+    try {
+        await track.applyConstraints({ advanced: [{ torch: scannerTorchOn }] });
+        if (torchBtn) {
+            torchBtn.textContent = scannerTorchOn ? '关灯' : '开灯';
+            torchBtn.classList.toggle('btn-info', !scannerTorchOn);
+            torchBtn.classList.toggle('btn-warning', scannerTorchOn);
+        }
+    } catch (e) {
+        scannerTorchOn = false;
+        showToast('这台设备不支持补光灯', '#ff9800');
+    }
+}
+
 function startScanner() {
     const modal = document.getElementById('scannerModal');
     if (!modal) return;
@@ -95,60 +186,82 @@ function startScanner() {
     const reader = document.getElementById('reader');
     if (reader) reader.innerHTML = '';
 
+    const torchBtn = document.getElementById('torchBtn');
+    if (torchBtn) {
+        torchBtn.style.display = 'none';
+        torchBtn.textContent = '开灯';
+    }
+    scannerTorchOn = false;
+
     if (typeof Html5Qrcode === 'undefined') {
         showToast('扫码库未加载，请检查网络', '#ff9800');
         stopScanner();
         return;
     }
 
-    // 优先启用浏览器原生 BarcodeDetector，比纯 JS 解码快数倍
-    html5QrCode = new Html5Qrcode('reader', {
+    const hasNativeDetector = typeof window.BarcodeDetector !== 'undefined';
+
+    const ctorOptions = {
         verbose: false,
         experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-    });
+    };
+    // 原生 BarcodeDetector 支持哪些格式由浏览器决定，不要限制；
+    // 华为自带浏览器等不支持原生检测的会退回 ZXing，这时限定格式能明显提速
+    if (!hasNativeDetector) {
+        const formats = retailBarcodeFormats();
+        if (formats && formats.length) ctorOptions.formatsToSupport = formats;
+    }
+
+    html5QrCode = new Html5Qrcode('reader', ctorOptions);
 
     Html5Qrcode.getCameras().then(function(cameras) {
-        if (cameras && cameras.length) {
-            // 优先选择后置摄像头
-            let cameraId = cameras[cameras.length - 1].id;
-            const backCamera = cameras.find(function(c) {
-                return /back|rear|environment/i.test(c.label);
-            });
-            if (backCamera) cameraId = backCamera.id;
-
-            html5QrCode.start(
-                cameraId,
-                {
-                    fps: 25,
-                    disableFlip: true,
-                    aspectRatio: 1.7777778,
-                    // 一维条形码是横向长条，这里用“宽扁”识别区，方框会切掉条码
-                    qrbox: function(w, h) {
-                        return {
-                            width: Math.floor(w * 0.9),
-                            height: Math.floor(h * 0.45)
-                        };
-                    }
-                },
-                function(decodedText) {
-                    const barcodeInput = document.getElementById('barcode');
-                    barcodeInput.value = decodedText;
-                    handleBarcodeChange();
-                    showToast('识别成功：' + decodedText, '#4CAF50', 2000);
-                    stopScanner();
-                },
-                function() {
-                    // 帧解析中的临时错误，静默忽略
-                }
-            ).catch(function(err) {
-                console.error('启动摄像头失败:', err);
-                showToast('启动摄像头失败：' + (err.message || err), '#f44336');
-                stopScanner();
-            });
-        } else {
+        if (!cameras || !cameras.length) {
             showToast('未检测到摄像头', '#ff9800');
             stopScanner();
+            return;
         }
+
+        const cameraId = pickBackCameraId(cameras);
+
+        html5QrCode.start(
+            cameraId,
+            {
+                fps: 25,
+                disableFlip: true,
+                aspectRatio: 1.7777778,
+                // 一维条形码是横向长条，这里用“宽扁”识别区，方框会切掉条码
+                qrbox: function(w, h) {
+                    return {
+                        width: Math.floor(w * 0.92),
+                        height: Math.floor(h * 0.5)
+                    };
+                },
+                // 库默认不指定分辨率，手机可能给出很低的画质导致条码糊成一团。
+                // 解码画布只有预览那么大，源头给 1280x720 是清晰度和速度的平衡点
+                videoConstraints: {
+                    deviceId: { exact: cameraId },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
+            },
+            function(decodedText) {
+                try { if (navigator.vibrate) navigator.vibrate(60); } catch (e) {}
+                const barcodeInput = document.getElementById('barcode');
+                barcodeInput.value = decodedText;
+                handleBarcodeChange();
+                showToast('识别成功：' + decodedText, '#4CAF50', 2000);
+                stopScanner();
+            },
+            function() {
+                // 帧解析中的临时错误，静默忽略
+            }
+        ).then(function() {
+            setupTorch();
+        }).catch(function(err) {
+            console.error('启动摄像头失败:', err);
+            showToast('启动摄像头失败：' + (err.message || err), '#f44336');
+            stopScanner();
+        });
     }).catch(function(err) {
         console.error('获取摄像头失败:', err);
         showToast('无法访问摄像头，请确认已授权', '#f44336');
@@ -159,6 +272,8 @@ function startScanner() {
 function stopScanner() {
     const modal = document.getElementById('scannerModal');
     if (modal) modal.style.display = 'none';
+
+    scannerTorchOn = false;
 
     if (!html5QrCode) return;
 
@@ -303,6 +418,28 @@ async function ghSave(newProducts, newMappings, message, isRetry) {
 }
 
 /* ===================== 4. CloudBase 初始化 ===================== */
+
+// CloudBase SDK 有几百 KB，只在真的要用云端同步时才下载，避免拖慢首屏
+const CB_SDK_URL = 'https://static.cloudbase.net/cloudbase-js-sdk/3.9.3/cloudbase.full.js';
+let cbSdkLoading = null;
+
+function loadScriptOnce(src) {
+    if (cbSdkLoading) return cbSdkLoading;
+
+    cbSdkLoading = new Promise(function(resolve, reject) {
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = function() { resolve(true); };
+        script.onerror = function() {
+            cbSdkLoading = null;   // 允许下次重试
+            reject(new Error('脚本加载失败：' + src));
+        };
+        document.head.appendChild(script);
+    });
+
+    return cbSdkLoading;
+}
+
 async function initCloudBase() {
     if (cloudReady) return true;
 
@@ -311,7 +448,15 @@ async function initCloudBase() {
         return false;
     }
     if (typeof cloudbase === 'undefined') {
-        console.error('CloudBase SDK 未加载，请检查 index.html 中的 CDN 引入');
+        try {
+            await loadScriptOnce(CB_SDK_URL);
+        } catch (err) {
+            console.error('CloudBase SDK 加载失败:', err);
+            return false;
+        }
+    }
+    if (typeof cloudbase === 'undefined') {
+        console.error('CloudBase SDK 加载失败，云端同步不可用');
         return false;
     }
 
@@ -428,6 +573,8 @@ function bindEventListeners() {
     if (scanBtn) scanBtn.addEventListener('click', startScanner);
     const stopScanBtn = document.getElementById('stopScanBtn');
     if (stopScanBtn) stopScanBtn.addEventListener('click', stopScanner);
+    const torchBtn = document.getElementById('torchBtn');
+    if (torchBtn) torchBtn.addEventListener('click', toggleTorch);
 
     // 点击遮罩关闭扫码弹窗
     const scannerModal = document.getElementById('scannerModal');
@@ -495,25 +642,41 @@ function bindEventListeners() {
 /* ===================== 5. 商品表单 ===================== */
 // 处理条码输入变化
 function handleBarcodeChange() {
-    const barcode = document.getElementById('barcode').value;
+    const barcode = document.getElementById('barcode').value.trim();
     const productNameInput = document.getElementById('productName');
 
     // 查找映射
     const mapping = productMappings.find(function(item) { return item.barcode === barcode; });
-    productNameInput.value = mapping ? mapping.productName : '';
+    // 只有查到映射才覆盖名称；查不到时保留手填内容，不要清空
+    if (mapping) productNameInput.value = mapping.productName;
 }
 
-// 计算到期日期
+// 计算到期日期（保质期支持 天 / 月 / 年）
 function calculateExpiryDate() {
-    const productionDate = document.getElementById('productionDate').value;
-    const shelfLife = document.getElementById('shelfLife').value;
+    const productionDate = parseDateLocal(document.getElementById('productionDate').value);
+    const shelfLifeInput = document.getElementById('shelfLife');
+    const unitInput = document.getElementById('shelfLifeUnit');
     const validityInput = document.getElementById('validity');
 
-    if (productionDate && shelfLife) {
-        const date = new Date(productionDate);
-        date.setMonth(date.getMonth() + parseInt(shelfLife));
-        validityInput.value = date.toISOString().split('T')[0];
+    if (!productionDate) return;
+
+    const amount = parseInt(shelfLifeInput.value, 10);
+    if (!amount || amount <= 0) return;
+
+    const unit = unitInput ? unitInput.value : '月';
+    let expiry;
+
+    if (unit === '天') {
+        // 鲜奶、面包这类按天算的保质期
+        expiry = new Date(productionDate.getTime());
+        expiry.setDate(expiry.getDate() + amount);
+    } else if (unit === '年') {
+        expiry = addMonthsClamped(productionDate, amount * 12);
+    } else {
+        expiry = addMonthsClamped(productionDate, amount);
     }
+
+    validityInput.value = formatDateLocal(expiry);
 }
 
 // 处理商品表单提交
@@ -522,6 +685,9 @@ function handleProductSubmit(e) {
 
     const formData = new FormData(e.target);
     const isEditing = e.target.dataset.editingId;
+
+    const shelfLifeUnitInput = document.getElementById('shelfLifeUnit');
+    const shelfLifeUnit = shelfLifeUnitInput ? shelfLifeUnitInput.value : '月';
 
     if (isEditing) {
         // 编辑模式：更新现有商品（使用宽松比较，兼容字符串 / 数字类型的 id）
@@ -534,6 +700,7 @@ function handleProductSubmit(e) {
                 productName: formData.get('productName'),
                 productionDate: formData.get('productionDate'),
                 shelfLife: formData.get('shelfLife'),
+                shelfLifeUnit: shelfLifeUnit,
                 validity: formData.get('validity')
             });
 
@@ -550,15 +717,15 @@ function handleProductSubmit(e) {
         }
     } else {
         // 添加模式：创建新商品
-        const today = new Date().toISOString().split('T')[0];
         const product = {
-            id: Date.now(),
+            id: Date.now() + Math.floor(Math.random() * 1000),   // 避免连点两次生成相同 id
             barcode: formData.get('barcode'),
             productName: formData.get('productName'),
             type: '商品',          // 默认类型为"商品"
-            scanDate: today,       // 默认扫描日期为当前日期
+            scanDate: todayLocal(), // 按本地日期记录，避免晚上录入被记成前一天
             productionDate: formData.get('productionDate'),
             shelfLife: formData.get('shelfLife'),
+            shelfLifeUnit: shelfLifeUnit,
             validity: formData.get('validity'),
             createdAt: new Date().toISOString()
         };
@@ -586,6 +753,23 @@ function saveMappings() {
 }
 
 /* ===================== 6. 列表渲染 ===================== */
+
+// 防止导入的 CSV 里带有 HTML 破坏页面
+function escapeHtml(value) {
+    return String(value === undefined || value === null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+// 保质期显示，例如“12个月”“7天”；旧数据没有单位时按“月”处理
+function formatShelfLife(product) {
+    if (!product || !product.shelfLife) return '-';
+    const unit = product.shelfLifeUnit || '月';
+    return product.shelfLife + (unit === '月' ? '个月' : unit);
+}
+
 // 更新商品列表
 function updateProductList() {
     const tbody = document.querySelector('#productTable tbody');
@@ -611,9 +795,14 @@ function updateProductList() {
         });
     }
 
-    // 按到期日期排序（已过期的排前面，然后按有效期从近到远）
+    // 按到期日期排序：已过期 / 快到期排前面，没填有效期的排最后
     const sortedProducts = displayProducts.sort(function(a, b) {
-        return new Date(a.validity) - new Date(b.validity);
+        const da = parseDateLocal(a.validity);
+        const db = parseDateLocal(b.validity);
+        if (!da && !db) return 0;
+        if (!da) return 1;
+        if (!db) return -1;
+        return da - db;
     });
 
     sortedProducts.forEach(function(product, index) {
@@ -632,14 +821,14 @@ function updateProductList() {
 
         row.innerHTML = `
             <td>${index + 1}</td>
-            <td${validityStyle}>${product.validity}</td>
-            <td><span class="status status-${status}">${getStatusText(status)}</span></td>
-            <td${nameStyle}>${product.productName}</td>
-            <td>${product.type}</td>
-            <td>${product.scanDate}</td>
-            <td>${product.productionDate || '-'}</td>
-            <td>${product.shelfLife || '-'}</td>
-            <td>${product.barcode}</td>
+            <td${validityStyle}>${escapeHtml(product.validity) || '-'}</td>
+            <td><span class="status status-${status}">${getStatusLabel(product.validity)}</span></td>
+            <td${nameStyle}>${escapeHtml(product.productName)}</td>
+            <td>${escapeHtml(product.type)}</td>
+            <td>${escapeHtml(product.scanDate)}</td>
+            <td>${escapeHtml(product.productionDate) || '-'}</td>
+            <td>${formatShelfLife(product)}</td>
+            <td>${escapeHtml(product.barcode)}</td>
             <td${actionStyle}>
                 <button class="btn btn-secondary" onclick="editProduct('${product.id}')">编辑</button>
                 <button class="btn btn-danger" onclick="deleteProduct('${product.id}')">删除</button>
@@ -671,16 +860,23 @@ function filterOneMonthExpiry() {
     updateProductList();
 }
 
+// 距离到期还有多少天（按本地日历日算：今天到期是 0，昨天到期是 -1）
+function getDaysLeft(validity) {
+    const expiry = parseDateLocal(validity);
+    if (!expiry) return null;
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return Math.round((expiry - today) / 86400000);
+}
+
 // 获取到期状态
 function getExpiryStatus(validity) {
-    const today = new Date();
-    const expiry = new Date(validity);
-    const diffTime = expiry - today;
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    if (diffDays < 0) return 'expired';
-    if (diffDays <= 30) return 'danger';
-    if (diffDays <= 90) return 'warning';
+    const days = getDaysLeft(validity);
+    if (days === null) return 'unknown';   // 没填有效期，不能当成“正常”
+    if (days < 0) return 'expired';
+    if (days <= 30) return 'danger';
+    if (days <= 90) return 'warning';
     return 'normal';
 }
 
@@ -690,9 +886,19 @@ function getStatusText(status) {
         normal: '正常',
         warning: '1-3个月',
         danger: '1个月内',
-        expired: '已过期'
+        expired: '已过期',
+        unknown: '无有效期'
     };
     return statusMap[status] || status;
+}
+
+// 列表状态列用的短标签：直接写“还剩几天”，比“1个月内”更直观
+function getStatusLabel(validity) {
+    const days = getDaysLeft(validity);
+    if (days === null) return '未填有效期';
+    if (days < 0) return '过期' + Math.abs(days) + '天';
+    if (days === 0) return '今天到期';
+    return '剩' + days + '天';
 }
 
 // 更新映射列表
@@ -745,6 +951,10 @@ window.editProduct = function(id) {
         document.getElementById('productName').value = product.productName;
         document.getElementById('productionDate').value = product.productionDate;
         document.getElementById('shelfLife').value = product.shelfLife;
+
+        const unitInput = document.getElementById('shelfLifeUnit');
+        if (unitInput) unitInput.value = product.shelfLifeUnit || '月';
+
         document.getElementById('validity').value = product.validity;
 
         // 设置编辑模式
@@ -922,45 +1132,124 @@ window.deleteMapping = function(id) {
 };
 
 /* ===================== 8. CSV 导入导出 ===================== */
-// 导出CSV
+// CSV 单元格转义：内部引号加倍，否则商品名里带逗号会把列冲错
+function csvCell(value) {
+    const text = value === undefined || value === null ? '' : String(value);
+    return '"' + text.replace(/"/g, '""') + '"';
+}
+
+// 导出CSV（商品 + 映射，导出文件本身就是一份完整备份）
 function exportToCSV() {
-    if (products.length === 0) {
+    if (products.length === 0 && productMappings.length === 0) {
         alert('没有数据可以导出！');
         return;
     }
 
-    const headers = ['类型', '商品条码', '商品名称', '扫描日期', '有效期', '生产日期', '保质期(月)', '状态'];
-    const rows = products.map(function(product) {
-        return [
-            product.type,
+    const headers = ['类型', '商品条码', '商品名称', '扫描日期', '有效期', '生产日期', '保质期', '状态'];
+    const rows = [];
+
+    products.forEach(function(product) {
+        const shelfLife = formatShelfLife(product);
+        rows.push([
+            product.type || '商品',
             product.barcode,
             product.productName,
             product.scanDate,
             product.validity,
             product.productionDate || '',
-            product.shelfLife || '',
+            shelfLife === '-' ? '' : shelfLife,
             getStatusText(getExpiryStatus(product.validity))
-        ];
+        ]);
+    });
+
+    // 映射也一起导出，否则换台设备映射就全丢了
+    productMappings.forEach(function(mapping) {
+        rows.push(['映射', mapping.barcode, mapping.productName, '', '', '', '', '']);
     });
 
     const csvContent = [
         headers.join(','),
         ...rows.map(function(row) {
-            return row.map(function(cell) { return `"${cell}"`; }).join(',');
+            return row.map(csvCell).join(',');
         })
     ].join('\n');
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    // 前面加 UTF-8 BOM（0xFEFF），否则 Excel 打开中文会乱码
+    const blob = new Blob([String.fromCharCode(65279) + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
 
     link.setAttribute('href', url);
-    link.setAttribute('download', `商品到期提醒_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', '商品到期提醒_' + todayLocal() + '.csv');
     link.style.visibility = 'hidden';
 
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+}
+
+// 解析CSV文本：正确处理引号包裹、引号内的逗号和换行
+function parseCsvText(text) {
+    const QUOTE = 34;   // "
+    const COMMA = 44;   // ,
+    const LF = 10;      // 换行
+    const CR = 13;      // 回车
+
+    const rows = [];
+    let row = [];
+    let field = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+
+        if (inQuotes) {
+            if (code === QUOTE) {
+                if (text.charCodeAt(i + 1) === QUOTE) { field += '"'; i++; }
+                else inQuotes = false;
+            } else {
+                field += text[i];
+            }
+        } else if (code === QUOTE) {
+            inQuotes = true;
+        } else if (code === COMMA) {
+            row.push(field); field = '';
+        } else if (code === LF) {
+            row.push(field); rows.push(row); row = []; field = '';
+        } else if (code !== CR) {
+            field += text[i];
+        }
+    }
+
+    if (field !== '' || row.length > 0) {
+        row.push(field);
+        rows.push(row);
+    }
+
+    return rows.filter(function(r) {
+        return r.some(function(c) { return String(c).trim() !== ''; });
+    });
+}
+
+// 去掉文件开头的 BOM，否则第一列“类型”识别不出来
+function stripBom(text) {
+    return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
+}
+
+// 把“7天”“12个月”“3年”“12”这样的保质期文本拆成 数量 + 单位
+function parseShelfLifeText(text) {
+    const raw = String(text || '').trim();
+    const m = /^(\d+(?:\.\d+)?)\s*(天|日|周|个月|月|年)?/.exec(raw);
+    if (!m) return { shelfLife: '', shelfLifeUnit: '月' };
+
+    let value = Number(m[1]);
+    let unit = m[2] || '月';
+    if (unit === '日') unit = '天';
+    if (unit === '周') { unit = '天'; value = value * 7; }
+    if (unit === '个月') unit = '月';
+
+    return { shelfLife: String(parseInt(value, 10)), shelfLifeUnit: unit };
 }
 
 // 导入CSV
@@ -970,8 +1259,8 @@ function importFromCSV(e) {
 
     const reader = new FileReader();
     reader.onload = function(event) {
-        const csvContent = event.target.result;
-        const rows = csvContent.split('\n').filter(function(row) { return row.trim(); });
+        const csvContent = stripBom(String(event.target.result || ''));
+        const rows = parseCsvText(csvContent);
 
         if (rows.length < 2) {
             alert('CSV文件格式不正确！');
@@ -981,41 +1270,43 @@ function importFromCSV(e) {
         let productCount = 0;
         let mappingCount = 0;
 
-        // 跳过表头，顺序：类型、商品条码、商品名称、扫描日期、有效期、生产日期、保质期(月)
+        // 跳过表头，顺序：类型、商品条码、商品名称、扫描日期、有效期、生产日期、保质期、状态
         for (let i = 1; i < rows.length; i++) {
-            const row = rows[i].split(',').map(function(cell) { return cell.replace(/"/g, ''); });
-            if (row.length >= 3) {
-                const type = row[0].trim();
-                const barcode = row[1].trim();
-                const productName = row[2].trim();
+            const row = rows[i];
+            const type = (row[0] || '').trim();
+            const barcode = (row[1] || '').trim();
+            const productName = (row[2] || '').trim();
 
-                if (type === '商品' && row.length >= 7) {
-                    products.push({
-                        id: Date.now() + i,
-                        type: type,
-                        barcode: barcode,
-                        productName: productName,
-                        scanDate: row[3] || '',
-                        validity: row[4] || '',
-                        productionDate: row[5] || '',
-                        shelfLife: row[6] || '',
-                        createdAt: new Date().toISOString()
-                    });
-                    productCount++;
-                } else if (type === '映射') {
-                    const mapping = {
-                        id: Date.now() + i + 1000,   // 确保ID与商品不冲突
-                        barcode: barcode,
-                        productName: productName
-                    };
-                    const existingIndex = productMappings.findIndex(function(m) { return m.barcode === barcode; });
-                    if (existingIndex >= 0) {
-                        productMappings[existingIndex] = mapping;
-                    } else {
-                        productMappings.push(mapping);
-                    }
-                    mappingCount++;
+            if (!barcode) continue;
+
+            if (type === '商品') {
+                const shelf = parseShelfLifeText(row[6]);
+                products.push({
+                    id: Date.now() + i,
+                    type: '商品',
+                    barcode: barcode,
+                    productName: productName,
+                    scanDate: (row[3] || '').trim(),
+                    validity: (row[4] || '').trim(),
+                    productionDate: (row[5] || '').trim(),
+                    shelfLife: shelf.shelfLife,
+                    shelfLifeUnit: shelf.shelfLifeUnit,
+                    createdAt: new Date().toISOString()
+                });
+                productCount++;
+            } else if (type === '映射') {
+                const mapping = {
+                    id: Date.now() + i + 1000,   // 确保ID与商品不冲突
+                    barcode: barcode,
+                    productName: productName
+                };
+                const existingIndex = productMappings.findIndex(function(m) { return m.barcode === barcode; });
+                if (existingIndex >= 0) {
+                    productMappings[existingIndex] = mapping;
+                } else {
+                    productMappings.push(mapping);
                 }
+                mappingCount++;
             }
         }
 
@@ -1025,7 +1316,7 @@ function importFromCSV(e) {
         updateMappingList();
         updateChart();
 
-        alert(`成功导入 ${productCount} 条商品记录和 ${mappingCount} 条映射记录！`);
+        alert('成功导入 ' + productCount + ' 条商品记录和 ' + mappingCount + ' 条映射记录！');
     };
 
     reader.readAsText(file, 'UTF-8');
@@ -1098,10 +1389,11 @@ function initializeChart() {
 
 // 获取到期数量统计
 function getExpiryCounts() {
-    const counts = { normal: 0, warning: 0, danger: 0, expired: 0 };
+    const counts = { normal: 0, warning: 0, danger: 0, expired: 0, unknown: 0 };
 
     products.forEach(function(product) {
         const status = getExpiryStatus(product.validity);
+        if (counts[status] === undefined) return;   // 未填有效期的记录不进图表
         counts[status]++;
     });
 
@@ -1204,7 +1496,7 @@ async function syncData() {
 // 把本地数组按 barcode 写入云端集合
 async function upsertCollection(collectionName, localItems) {
     const fields = collectionName === PRODUCT_COLLECTION
-        ? ['barcode', 'productName', 'type', 'scanDate', 'productionDate', 'shelfLife', 'validity']
+        ? ['barcode', 'productName', 'type', 'scanDate', 'productionDate', 'shelfLife', 'shelfLifeUnit', 'validity']
         : ['barcode', 'productName'];
 
     // 1. 拉取云端已有记录，建立 barcode -> _id 映射
@@ -1295,6 +1587,7 @@ async function fetchLatestDataFromCloud() {
                         scanDate: '',
                         productionDate: '',
                         shelfLife: '',
+                        shelfLifeUnit: '月',
                         validity: ''
                     }, p);
                 });
@@ -1340,6 +1633,7 @@ async function fetchLatestDataFromCloud() {
                     scanDate: doc.scanDate || '',
                     productionDate: doc.productionDate || '',
                     shelfLife: doc.shelfLife || '',
+                    shelfLifeUnit: doc.shelfLifeUnit || '月',
                     validity: doc.validity || '',
                     createdAt: doc._createTime
                         ? new Date(doc._createTime).toISOString()
