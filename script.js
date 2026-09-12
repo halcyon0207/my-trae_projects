@@ -703,6 +703,31 @@ function bindEventListeners() {
     // 筛选1个月内到期商品
     document.getElementById('filterBtn').addEventListener('click', filterOneMonthExpiry);
 
+    // 只看已处理的商品
+    const handledFilterBtn = document.getElementById('handledFilterBtn');
+    if (handledFilterBtn) handledFilterBtn.addEventListener('click', toggleHandledFilter);
+
+    // 处置弹窗：确认 / 取消 / 点遮罩关闭，备注框里按回车直接确认
+    const handleModal = document.getElementById('handleModal');
+    if (handleModal) {
+        handleModal.addEventListener('click', function(e) {
+            if (e.target === handleModal) closeHandleDialog();
+        });
+    }
+    const handleConfirmBtn = document.getElementById('handleConfirmBtn');
+    if (handleConfirmBtn) handleConfirmBtn.addEventListener('click', confirmHandle);
+    const handleCancelBtn = document.getElementById('handleCancelBtn');
+    if (handleCancelBtn) handleCancelBtn.addEventListener('click', closeHandleDialog);
+    const handleNoteInput = document.getElementById('handleNote');
+    if (handleNoteInput) {
+        handleNoteInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                confirmHandle();
+            }
+        });
+    }
+
     // 添加映射
     document.getElementById('addMappingBtn').addEventListener('click', addMapping);
 
@@ -852,6 +877,36 @@ function saveMappings() {
     localStorage.setItem('productMappings', JSON.stringify(productMappings));
 }
 
+/* ===================== 5.5 处置状态（保留原始记录，不删除） ===================== */
+// 过期/用不上的商品不删掉，只在记录上挂一份处置信息：
+//   handledAt     处置日期（有值即视为已处理；老数据没这个字段 = 未处理，无需迁移）
+//   handledAction 处置方式，取自下面的预设分类
+//   handledNote   备注，可留空
+// 条码、生产日期、有效期这些原始字段一个都不动，随时可以撤销回到待处理。
+const HANDLE_ACTIONS = ['已用完', '已丢弃', '已退换', '其他'];
+
+// 是否已处理
+function isHandled(product) {
+    return !!(product && product.handledAt);
+}
+
+// 处置信息摘要，例如「已丢弃 · 2026-09-12 · 长毛了整箱扔」
+function formatHandledInfo(product) {
+    const parts = [
+        product.handledAction || '已处理',
+        product.handledAt || '',
+        product.handledNote || ''
+    ];
+    return parts.filter(function(part) { return !!part; }).join(' · ');
+}
+
+// 按 uid 找商品（老记录兜底用数字 id）
+function findProductByKey(id) {
+    let product = products.find(function(p) { return p.uid && String(p.uid) === String(id); });
+    if (!product) product = products.find(function(p) { return String(p.id) === String(id); });
+    return product;
+}
+
 /* ===================== 6. 列表渲染 ===================== */
 
 // 防止导入的 CSV 里带有 HTML 破坏页面
@@ -878,11 +933,21 @@ function updateProductList() {
     // 获取要显示的商品列表
     let displayProducts = products.slice();
 
-    // 如果是筛选模式，只显示1个月内到期的商品
-    if (currentDisplayMode === 'filter') {
+    if (currentDisplayMode === 'handled') {
+        // 「显示已处理」模式：只看处理过的
+        displayProducts = displayProducts.filter(isHandled);
+    } else if (currentDisplayMode === 'filter') {
+        // 筛选模式：只显示1个月内到期的未处理商品
         displayProducts = displayProducts.filter(function(product) {
+            if (isHandled(product)) return false;
             const status = getExpiryStatus(product.validity);
             return status === 'danger' || status === 'expired';
+        });
+    } else {
+        // 默认模式：已处理的隐藏起来；
+        // 但搜索时要把它们带出来，否则「处理过的东西搜不到」很反直觉
+        displayProducts = displayProducts.filter(function(product) {
+            return !isHandled(product) || !!productSearchQuery;
         });
     }
 
@@ -895,8 +960,13 @@ function updateProductList() {
         });
     }
 
-    // 按到期日期排序：已过期 / 快到期排前面，没填有效期的排最后
+    // 按到期日期排序：已过期 / 快到期排前面，没填有效期的排最后；
+    // 已处理的统一沉到最底下（搜索时才会和未处理的混在一起显示）
     const sortedProducts = displayProducts.sort(function(a, b) {
+        const handledA = isHandled(a);
+        const handledB = isHandled(b);
+        if (handledA !== handledB) return handledA ? 1 : -1;
+
         const da = parseDateLocal(a.validity);
         const db = parseDateLocal(b.validity);
         if (!da && !db) return 0;
@@ -905,8 +975,26 @@ function updateProductList() {
         return da - db;
     });
 
+    // 一条都没有时给句提示，否则「已处理默认隐藏」会让人误以为数据丢了
+    if (sortedProducts.length === 0) {
+        let tip = '没有符合条件的商品';
+        if (currentDisplayMode === 'handled') {
+            tip = '还没有标记过处理的商品';
+        } else if (products.length > 0) {
+            tip = '没有待处理的商品（处理过的默认隐藏，可点「显示已处理」查看）';
+        }
+        const emptyRow = document.createElement('tr');
+        emptyRow.innerHTML = '<td colspan="10" class="empty-tip">' + tip + '</td>';
+        tbody.appendChild(emptyRow);
+
+        // 列表变了，顶部的到期提醒跟着刷新
+        updateReminder();
+        return;
+    }
+
     sortedProducts.forEach(function(product, index) {
         const row = document.createElement('tr');
+        const handled = isHandled(product);
         const status = getExpiryStatus(product.validity);
 
         // 筛选模式下高亮显示关键信息
@@ -920,25 +1008,42 @@ function updateProductList() {
         }
 
         // 已过期 / 30 天内到期的整行加底色，配合末尾的排序做到「临期置顶一眼可见」
-        if (status === 'expired') row.classList.add('row-expired');
+        // 已处理的只用灰色压暗，不再用红黄底色（它已经不是待办了）
+        if (handled) row.classList.add('row-handled');
+        else if (status === 'expired') row.classList.add('row-expired');
         else if (status === 'danger') row.classList.add('row-danger');
 
         const rowKey = product.uid || product.id;
 
+        // 状态列：已处理的显示处置标记，未处理的显示还剩/过期几天
+        const statusCell = handled
+            ? '<span class="status status-handled">已处理</span>'
+            : '<span class="status status-' + status + '">' + getStatusLabel(product.validity) + '</span>';
+
+        // 名称列：已处理的在下面补一行「处置方式 · 日期 · 备注」
+        const nameCell = handled
+            ? escapeHtml(product.productName) + '<div class="handled-note">' + escapeHtml(formatHandledInfo(product)) + '</div>'
+            : escapeHtml(product.productName);
+
+        // 操作列：未处理的先给「处理」，已处理的给「撤销处理」；删除一直保留
+        const actions = handled
+            ? '<button class="btn btn-secondary" onclick="undoHandle(\'' + rowKey + '\')">撤销处理</button>' +
+              '<button class="btn btn-danger" onclick="deleteProduct(\'' + rowKey + '\')">删除</button>'
+            : '<button class="btn btn-info" onclick="openHandleDialog(\'' + rowKey + '\')">处理</button>' +
+              '<button class="btn btn-secondary" onclick="editProduct(\'' + rowKey + '\')">编辑</button>' +
+              '<button class="btn btn-danger" onclick="deleteProduct(\'' + rowKey + '\')">删除</button>';
+
         row.innerHTML = `
             <td>${index + 1}</td>
             <td${validityStyle}>${escapeHtml(product.validity) || '-'}</td>
-            <td><span class="status status-${status}">${getStatusLabel(product.validity)}</span></td>
-            <td${nameStyle}>${escapeHtml(product.productName)}</td>
+            <td>${statusCell}</td>
+            <td${nameStyle}>${nameCell}</td>
             <td>${escapeHtml(product.type)}</td>
             <td>${escapeHtml(product.scanDate)}</td>
             <td>${escapeHtml(product.productionDate) || '-'}</td>
             <td>${formatShelfLife(product)}</td>
             <td>${escapeHtml(product.barcode)}</td>
-            <td${actionStyle}>
-                <button class="btn btn-secondary" onclick="editProduct('${rowKey}')">编辑</button>
-                <button class="btn btn-danger" onclick="deleteProduct('${rowKey}')">删除</button>
-            </td>
+            <td${actionStyle}>${actions}</td>
         `;
 
         tbody.appendChild(row);
@@ -948,24 +1053,36 @@ function updateProductList() {
     updateReminder();
 }
 
-// 筛选1个月内到期的商品
-function filterOneMonthExpiry() {
-    // 切换显示模式
-    currentDisplayMode = currentDisplayMode === 'all' ? 'filter' : 'all';
-
-    // 更新按钮文本
+// 两个筛选按钮（临期筛选 / 显示已处理）互斥，文案和配色统一在这里同步
+function syncFilterButtons() {
     const filterBtn = document.getElementById('filterBtn');
-    if (currentDisplayMode === 'filter') {
-        filterBtn.textContent = '显示所有商品';
-        filterBtn.classList.remove('btn-warning');
-        filterBtn.classList.add('btn-success');
-    } else {
-        filterBtn.textContent = '筛选1个月内到期商品';
-        filterBtn.classList.remove('btn-success');
-        filterBtn.classList.add('btn-warning');
+    if (filterBtn) {
+        const on = currentDisplayMode === 'filter';
+        filterBtn.textContent = on ? '显示所有商品' : '筛选1个月内到期商品';
+        filterBtn.classList.toggle('btn-success', on);
+        filterBtn.classList.toggle('btn-warning', !on);
     }
 
-    // 更新商品列表
+    const handledBtn = document.getElementById('handledFilterBtn');
+    if (handledBtn) {
+        const on = currentDisplayMode === 'handled';
+        handledBtn.textContent = on ? '返回待处理' : '显示已处理';
+        handledBtn.classList.toggle('btn-success', on);
+        handledBtn.classList.toggle('btn-secondary', !on);
+    }
+}
+
+// 筛选1个月内到期的商品
+function filterOneMonthExpiry() {
+    currentDisplayMode = currentDisplayMode === 'filter' ? 'all' : 'filter';
+    syncFilterButtons();
+    updateProductList();
+}
+
+// 只看已处理的商品
+function toggleHandledFilter() {
+    currentDisplayMode = currentDisplayMode === 'handled' ? 'all' : 'handled';
+    syncFilterButtons();
     updateProductList();
 }
 
@@ -1020,6 +1137,9 @@ function getReminderSummary() {
     const summary = { expired: 0, danger: 0, expiredList: [], dangerList: [] };
 
     products.forEach(function(product) {
+        // 已处理的商品不再进提醒，否则处理完了横幅还天天挂着，等于白处理
+        if (isHandled(product)) return;
+
         const status = getExpiryStatus(product.validity);
         if (status === 'expired') {
             summary.expired++;
@@ -1082,12 +1202,7 @@ function updateReminder() {
     if (filterBtn) {
         filterBtn.addEventListener('click', function() {
             currentDisplayMode = 'filter';
-            const mainFilterBtn = document.getElementById('filterBtn');
-            if (mainFilterBtn) {
-                mainFilterBtn.textContent = '显示所有商品';
-                mainFilterBtn.classList.remove('btn-warning');
-                mainFilterBtn.classList.add('btn-success');
-            }
+            syncFilterButtons();
             updateProductList();
             const table = document.getElementById('productTable');
             if (table) table.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1244,6 +1359,95 @@ window.deleteProduct = function(id) {
     }
 };
 
+/* ===================== 8.1 标记处理 / 撤销处理 ===================== */
+// 当前正在处置的商品（弹窗点确认时用）
+let handleTargetKey = null;
+
+// 打开处置弹窗
+window.openHandleDialog = function(id) {
+    const product = findProductByKey(id);
+    if (!product) {
+        alert('未找到指定商品');
+        return;
+    }
+
+    const modal = document.getElementById('handleModal');
+    if (!modal) return;
+
+    handleTargetKey = id;
+
+    const nameEl = document.getElementById('handleProductName');
+    if (nameEl) {
+        nameEl.textContent = (product.productName || product.barcode || '未命名') +
+            (product.validity ? '（有效期 ' + product.validity + '）' : '');
+    }
+
+    const actionEl = document.getElementById('handleAction');
+    if (actionEl) actionEl.value = product.handledAction || HANDLE_ACTIONS[0];
+
+    const noteEl = document.getElementById('handleNote');
+    if (noteEl) noteEl.value = product.handledNote || '';
+
+    modal.style.display = 'flex';
+};
+
+// 关闭处置弹窗
+function closeHandleDialog() {
+    const modal = document.getElementById('handleModal');
+    if (modal) modal.style.display = 'none';
+    handleTargetKey = null;
+}
+
+// 确认处置：只在记录上挂标记，不删除任何原始字段
+window.confirmHandle = function() {
+    const product = findProductByKey(handleTargetKey);
+    if (!product) {
+        closeHandleDialog();
+        return;
+    }
+
+    const actionEl = document.getElementById('handleAction');
+    const noteEl = document.getElementById('handleNote');
+
+    product.handledAction = actionEl ? actionEl.value : HANDLE_ACTIONS[0];
+    product.handledNote = noteEl ? noteEl.value.trim() : '';
+    product.handledAt = todayLocal();
+
+    closeHandleDialog();
+
+    saveProducts();
+    updateProductList();
+    updateChart();
+    updateReminder();
+
+    showToast('已标记为「' + product.handledAction + '」，原始记录保留', '#4CAF50');
+};
+
+// 撤销处置：清掉标记，商品回到待处理列表
+window.undoHandle = function(id) {
+    const product = findProductByKey(id);
+    if (!product) {
+        alert('未找到指定商品');
+        return;
+    }
+
+    const label = product.handledAction || '已处理';
+    if (!confirm('撤销「' + label + '」标记，让它回到待处理列表？\n（商品记录一直都在，撤销只是清掉这个标记）')) {
+        return;
+    }
+
+    product.handledAction = '';
+    product.handledNote = '';
+    product.handledAt = '';
+
+    saveProducts();
+    updateProductList();
+    updateChart();
+    updateReminder();
+
+    showToast('已撤销处理标记，商品回到待处理列表', '#2196F3');
+};
+
 // 添加映射
 function addMapping() {
     const barcode = document.getElementById('newBarcode').value;
@@ -1369,7 +1573,9 @@ function exportToCSV() {
         return;
     }
 
-    const headers = ['类型', '商品条码', '商品名称', '扫描日期', '有效期', '生产日期', '保质期', '状态'];
+    // 处置相关的 3 列追加在最后：导入时按位置读前 8 列，追加不会破坏老文件的兼容性
+    const headers = ['类型', '商品条码', '商品名称', '扫描日期', '有效期', '生产日期', '保质期', '状态',
+                     '处置方式', '处置日期', '处置备注'];
     const rows = [];
 
     products.forEach(function(product) {
@@ -1382,13 +1588,16 @@ function exportToCSV() {
             product.validity,
             product.productionDate || '',
             shelfLife === '-' ? '' : shelfLife,
-            getStatusText(getExpiryStatus(product.validity))
+            getStatusText(getExpiryStatus(product.validity)),
+            product.handledAction || '',
+            product.handledAt || '',
+            product.handledNote || ''
         ]);
     });
 
     // 映射也一起导出，否则换台设备映射就全丢了
     productMappings.forEach(function(mapping) {
-        rows.push(['映射', mapping.barcode, mapping.productName, '', '', '', '', '']);
+        rows.push(['映射', mapping.barcode, mapping.productName, '', '', '', '', '', '', '', '']);
     });
 
     const csvContent = [
@@ -1494,7 +1703,7 @@ function importFromCSV(e) {
         let productCount = 0;
         let mappingCount = 0;
 
-        // 跳过表头，顺序：类型、商品条码、商品名称、扫描日期、有效期、生产日期、保质期、状态
+        // 跳过表头，顺序：类型、商品条码、商品名称、扫描日期、有效期、生产日期、保质期、状态、处置方式、处置日期、处置备注
         for (let i = 1; i < rows.length; i++) {
             const row = rows[i];
             const type = (row[0] || '').trim();
@@ -1505,6 +1714,13 @@ function importFromCSV(e) {
 
             if (type === '商品') {
                 const shelf = parseShelfLifeText(row[6]);
+
+                // 处置信息在最后 3 列。老备份文件没有这几列，读出来是空，按未处理处理
+                const handledAction = (row[8] || '').trim();
+                let handledAt = (row[9] || '').trim();
+                // 只有处置方式、没有日期时补今天；不然 handledAt 为空会被当成未处理，进不了已处理列表
+                if (handledAction && !handledAt) handledAt = todayLocal();
+
                 products.push({
                     uid: makeUid(),      // 导入的记录也要有 uid，否则同步时无法与云端一一对应
                     id: Date.now() + i,
@@ -1516,6 +1732,9 @@ function importFromCSV(e) {
                     productionDate: (row[5] || '').trim(),
                     shelfLife: shelf.shelfLife,
                     shelfLifeUnit: shelf.shelfLifeUnit,
+                    handledAction: handledAction,
+                    handledAt: handledAt,
+                    handledNote: (row[10] || '').trim(),
                     createdAt: new Date().toISOString()
                 });
                 productCount++;
@@ -1617,6 +1836,8 @@ function getExpiryCounts() {
     const counts = { normal: 0, warning: 0, danger: 0, expired: 0, unknown: 0 };
 
     products.forEach(function(product) {
+        if (isHandled(product)) return;   // 已处理的商品不再计入图表
+
         const status = getExpiryStatus(product.validity);
         if (counts[status] === undefined) return;   // 未填有效期的记录不进图表
         counts[status]++;
@@ -1784,8 +2005,10 @@ async function syncData() {
 // 商品按 uid 匹配；映射按条码匹配（一个条码本来就只该有一条映射）
 async function upsertCollection(collectionName, localItems) {
     const isProduct = collectionName === PRODUCT_COLLECTION;
+    // 字段清单必须和 fetchLatestDataFromCloud 的映射保持一致，漏一个就会出现「同步后处置状态丢了」
     const fields = isProduct
-        ? ['uid', 'barcode', 'productName', 'type', 'scanDate', 'productionDate', 'shelfLife', 'shelfLifeUnit', 'validity']
+        ? ['uid', 'barcode', 'productName', 'type', 'scanDate', 'productionDate', 'shelfLife', 'shelfLifeUnit', 'validity',
+           'handledAction', 'handledAt', 'handledNote']
         : ['barcode', 'productName'];
 
     // 1. 拉取云端已有记录，建立「匹配键 -> _id」映射
@@ -1933,6 +2156,9 @@ async function fetchLatestDataFromCloud() {
                 shelfLife: doc.shelfLife || '',
                 shelfLifeUnit: doc.shelfLifeUnit || '月',
                 validity: doc.validity || '',
+                handledAction: doc.handledAction || '',
+                handledAt: doc.handledAt || '',
+                handledNote: doc.handledNote || '',
                 createdAt: doc._createTime
                     ? new Date(doc._createTime).toISOString()
                     : new Date().toISOString()

@@ -69,6 +69,7 @@
                 <button id="syncBtn" class="btn btn-info">同步数据</button>
                 <button id="fetchBtn" class="btn btn-success">获取最新数据</button>
                 <button id="filterBtn" class="btn btn-warning">筛选1个月内到期商品</button>
+                <button id="handledFilterBtn" class="btn btn-secondary">显示已处理</button>
             </section>
 
             <!-- 图表展示 -->
@@ -138,6 +139,32 @@
                 </div>
             </section>
         </main>
+    </div>
+
+    <!-- 处置弹窗：标记为已处理，商品记录本身不删除 -->
+    <div id="handleModal" class="scanner-modal" style="display: none;">
+        <div class="handle-dialog">
+            <h3>标记已处理</h3>
+            <p id="handleProductName" class="handle-product"></p>
+            <div class="form-group">
+                <label for="handleAction">处置方式:</label>
+                <select id="handleAction">
+                    <option value="已用完">已用完</option>
+                    <option value="已丢弃">已丢弃</option>
+                    <option value="已退换">已退换</option>
+                    <option value="其他">其他</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="handleNote">备注（可不填）:</label>
+                <input type="text" id="handleNote" placeholder="例如：长毛了整箱扔 / 已退回超市">
+            </div>
+            <div class="scanner-actions">
+                <button type="button" id="handleConfirmBtn" class="btn btn-primary">确认处理</button>
+                <button type="button" id="handleCancelBtn" class="btn btn-secondary">取消</button>
+            </div>
+            <p class="handle-hint">标记后商品不会删除，条码 / 生产日期 / 有效期都会保留，只是从待处理列表里隐藏，随时可以撤销。</p>
+        </div>
     </div>
 
     <!-- 摄像头扫码弹窗 -->
