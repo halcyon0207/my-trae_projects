@@ -1033,7 +1033,9 @@ function updateProductList() {
               '<button class="btn btn-secondary" onclick="editProduct(\'' + rowKey + '\')">编辑</button>' +
               '<button class="btn btn-danger" onclick="deleteProduct(\'' + rowKey + '\')">删除</button>';
 
+        // 单元格顺序必须和 index.html 里 productTable 的表头一致：操作在最左
         row.innerHTML = `
+            <td${actionStyle}>${actions}</td>
             <td>${index + 1}</td>
             <td${validityStyle}>${escapeHtml(product.validity) || '-'}</td>
             <td>${statusCell}</td>
@@ -1043,7 +1045,6 @@ function updateProductList() {
             <td>${escapeHtml(product.productionDate) || '-'}</td>
             <td>${formatShelfLife(product)}</td>
             <td>${escapeHtml(product.barcode)}</td>
-            <td${actionStyle}>${actions}</td>
         `;
 
         tbody.appendChild(row);

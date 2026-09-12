@@ -82,6 +82,9 @@
                     <table id="productTable">
                         <thead>
                             <tr>
+                                <!-- 操作放在最左边：手机上打开列表第一眼就能点到按钮，不用横向滑到最右。
+                                     改这里的顺序时，script.js 里 renderProducts 的单元格顺序要一起改 -->
+                                <th>操作</th>
                                 <th>序号</th>
                                 <th>有效期</th>
                                 <th>状态</th>
@@ -91,7 +94,6 @@
                                 <th>生产日期</th>
                                 <th>保质期</th>
                                 <th>条码</th>
-                                <th>操作</th>
                             </tr>
                         </thead>
                         <tbody>
