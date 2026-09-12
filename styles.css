@@ -180,6 +180,12 @@ input:focus {
     margin-bottom: 20px;
 }
 
+/* 数据导入导出挪到了页面最下面，和上面的列表拉开距离，不再紧贴 */
+.data-controls {
+    margin-top: 30px;
+    margin-bottom: 0;
+}
+
 /* 图表区域 */
 .chart-section {
     height: 400px;
@@ -231,6 +237,15 @@ input:focus {
     box-shadow: 0 2px 2px rgba(0,0,0,0.05);
     position: relative;
     z-index: 5;
+}
+
+/* 商品列表的搜索区挪到了明细下方，分隔线与阴影要跟着翻过来，
+   否则会在表格和搜索框之间凭空多出一条线、底边反而没有分隔 */
+.list-section .search-controls {
+    border-top: 1px solid #eee;
+    border-bottom: none;
+    box-shadow: 0 -2px 2px rgba(0,0,0,0.05);
+    margin-bottom: 0;
 }
 
 /* 滚动内容区域 */
@@ -517,12 +532,37 @@ td .btn {
         margin-bottom: 8px;
     }
 
-    /* 表格内操作按钮加大，方便手指点击 */
+    /* 表格内操作按钮：点击区域要够大，但必须显式写 width: auto。
+       上面有 .btn { width: 100% }，表格里一格塞着 3 个按钮时会被撑成各占一行，
+       整行又高又宽，手机上得横向滑很久才能看到后面的列 */
     td .btn {
-        padding: 7px 10px;
+        width: auto;
+        padding: 7px 9px;
         font-size: 12px;
-        min-width: 48px;
-        margin-bottom: 4px;
+        min-width: 40px;
+        margin: 0 4px 4px 0;
+    }
+
+    /* 一格里最后一个按钮不要右边距，免得整格空出一截 */
+    td .btn:last-child {
+        margin-right: 0;
+    }
+
+    /* 列表下方的搜索区：输入框独占一行、「搜索」「清空」并排。
+       不这么写的话三个控件会各自铺满一整行，白白占掉大半屏 */
+    .list-section .search-controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+
+    .list-section .search-controls input {
+        grid-column: 1 / -1;
+    }
+
+    .list-section .search-controls .btn {
+        width: 100%;
+        margin: 0;
     }
 
     .status {
