@@ -501,6 +501,30 @@ td .btn {
     }
 }
 
+/* ===== 操作列：三个按钮收进一个下拉框 ===== */
+/* 并排三个按钮要占 ~140px，手机上光这一列就把「商品名称」顶出屏幕；
+   换成一个两字宽的下拉框后只占 ~70px。
+   不要给 select 写 width:100%：单元格是 nowrap，宽度跟着内容走才不会忽宽忽窄 */
+#productTable td .action-select {
+    max-width: 84px;
+    min-height: 32px;
+    padding: 4px 2px;
+    font-size: 12px;
+    color: inherit;              /* 已处理的行是灰字，下拉框跟着一起灰，别用默认黑 */
+    background-color: #fff;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+@media (max-width: 768px) {
+    /* 手机上把点击高度拉到 40px，宽度维持不变 */
+    #productTable td .action-select {
+        min-height: 40px;
+        padding: 6px 2px;
+        font-size: 13px;
+    }
+}
+
 /* ===== 手机端增强（触屏操作友好） ===== */
 @media (max-width: 768px) {
     header {

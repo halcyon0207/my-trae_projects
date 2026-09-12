@@ -1025,13 +1025,21 @@ function updateProductList() {
             ? escapeHtml(product.productName) + '<div class="handled-note">' + escapeHtml(formatHandledInfo(product)) + '</div>'
             : escapeHtml(product.productName);
 
-        // 操作列：未处理的先给「处理」，已处理的给「撤销处理」；删除一直保留
-        const actions = handled
-            ? '<button class="btn btn-secondary" onclick="undoHandle(\'' + rowKey + '\')">撤销处理</button>' +
-              '<button class="btn btn-danger" onclick="deleteProduct(\'' + rowKey + '\')">删除</button>'
-            : '<button class="btn btn-info" onclick="openHandleDialog(\'' + rowKey + '\')">处理</button>' +
-              '<button class="btn btn-secondary" onclick="editProduct(\'' + rowKey + '\')">编辑</button>' +
-              '<button class="btn btn-danger" onclick="deleteProduct(\'' + rowKey + '\')">删除</button>';
+        // 操作列：三个按钮收进一个下拉框，宽度从 ~140px 降到 ~70px，
+        // 手机上才不会把「商品名称」整列挤出屏幕。
+        // 用原生 <select> 而不是自定义弹层：表格容器是 overflow:auto，
+        // 绝对定位的菜单会被裁掉，而原生 select 的选项列表由系统绘制，不受影响。
+        // 选项文字统一两个字；「撤销」= 撤销处置标记（只有已处理的行才有这一项）。
+        const actions =
+            '<select class="action-select" data-key="' + escapeHtml(rowKey) + '"' +
+                    ' onchange="handleRowAction(this)">' +
+                '<option value="" selected>操作</option>' +
+                (handled
+                    ? '<option value="undo">撤销</option>'
+                    : '<option value="edit">编辑</option>' +
+                      '<option value="handle">处理</option>') +
+                '<option value="delete">删除</option>' +
+            '</select>';
 
         // 单元格顺序必须和 index.html 里 productTable 的表头一致：操作在最左
         row.innerHTML = `
@@ -1298,6 +1306,21 @@ window.editProduct = function(id) {
     } catch (error) {
         console.error('编辑功能执行失败:', error);
     }
+};
+
+// 操作列下拉框的分发：选中即执行，然后把选择复位成「操作」占位项。
+// 复位是必须的 —— 浏览器只在值发生变化时触发 change，
+// 不复位的话连着两次选「编辑」，第二次会因为值没变而完全没反应。
+window.handleRowAction = function(select) {
+    const key = select.dataset.key;
+    const action = select.value;
+
+    select.value = '';
+
+    if (action === 'edit') editProduct(key);
+    else if (action === 'handle') openHandleDialog(key);
+    else if (action === 'undo') undoHandle(key);
+    else if (action === 'delete') deleteProduct(key);
 };
 
 // 删除商品（全局函数，以便HTML onclick事件调用）
