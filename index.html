@@ -57,6 +57,10 @@
                         </div>
                     </div>
                     <button type="submit" class="btn btn-primary">添加商品</button>
+                    <!-- 只有从列表里点过「编辑」才显示（见 script.js 的 setEditMode），
+                         否则点完编辑表单被填上，想放弃就只能手动清空 -->
+                    <button type="button" id="cancelEditBtn" class="btn btn-secondary"
+                            style="display: none;" onclick="cancelEdit()">取消编辑</button>
                 </form>
             </section>
 

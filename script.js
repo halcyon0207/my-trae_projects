@@ -798,73 +798,63 @@ function calculateExpiryDate() {
     validityInput.value = formatDateLocal(expiry);
 }
 
+// 从表单里取字段，拼成一条完整的新记录。
+// 「添加商品」和「编辑」共用这一份逻辑，保证两边生成的字段不会写歪。
+function buildProductFromForm(formData, shelfLifeUnit) {
+    return {
+        uid: makeUid(),        // 唯一标识：同条码的不同批次靠它区分，同步时不会互相覆盖
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        barcode: formData.get('barcode'),
+        productName: formData.get('productName'),
+        type: '商品',          // 默认类型为"商品"
+        scanDate: todayLocal(), // 按本地日期记录，避免晚上录入被记成前一天
+        productionDate: formData.get('productionDate'),
+        shelfLife: formData.get('shelfLife'),
+        shelfLifeUnit: shelfLifeUnit,
+        validity: formData.get('validity'),
+        createdAt: new Date().toISOString()
+    };
+}
+
 // 处理商品表单提交
+// 「添加」和「编辑」走同一套逻辑：都往 products 里 push 一条新记录。
+// 编辑 = 重新添加一条：uid、扫描日期、类型、创建时间全部按新记录生成，
+// 原来那条记录原样保留 —— 不做原地覆盖，同一条码的不同批次可以各留一条。
 function handleProductSubmit(e) {
     e.preventDefault();
 
     const formData = new FormData(e.target);
-    const isEditing = e.target.dataset.editingId;
+    const editingId = e.target.dataset.editingId;   // 有值 = 从列表里点过「编辑」
 
     const shelfLifeUnitInput = document.getElementById('shelfLifeUnit');
     const shelfLifeUnit = shelfLifeUnitInput ? shelfLifeUnitInput.value : '月';
 
-    if (isEditing) {
-        // 编辑模式：按 uid 定位（老记录兜底用数字 id）
-        const productId = isEditing;
-        const productIndex = products.findIndex(function(p) {
-            return (p.uid && String(p.uid) === String(productId)) || String(p.id) === String(productId);
-        });
+    products.push(buildProductFromForm(formData, shelfLifeUnit));
 
-        if (productIndex !== -1) {
-            products[productIndex] = Object.assign({}, products[productIndex], {
-                uid: products[productIndex].uid || makeUid(),
-                barcode: formData.get('barcode'),
-                productName: formData.get('productName'),
-                productionDate: formData.get('productionDate'),
-                shelfLife: formData.get('shelfLife'),
-                shelfLifeUnit: shelfLifeUnit,
-                validity: formData.get('validity')
-            });
+    saveProducts();
+    updateProductList();
+    updateChart();
+    updateReminder();
 
-            saveProducts();
-            updateProductList();
-            updateChart();
-            updateReminder();
+    resetProductForm();
 
-            // 重置表单和编辑状态
-            e.target.reset();
-            delete e.target.dataset.editingId;
-            document.querySelector('#productForm button[type="submit"]').textContent = '添加商品';
+    alert(editingId ? '已按修改后的内容新增一条记录，原来那条仍保留在列表里。' : '商品添加成功！');
+}
 
-            alert('商品更新成功！');
-        }
-    } else {
-        // 添加模式：创建新商品
-        const product = {
-            uid: makeUid(),        // 唯一标识：同条码的不同批次靠它区分，同步时不会互相覆盖
-            id: Date.now() + Math.floor(Math.random() * 1000),
-            barcode: formData.get('barcode'),
-            productName: formData.get('productName'),
-            type: '商品',          // 默认类型为"商品"
-            scanDate: todayLocal(), // 按本地日期记录，避免晚上录入被记成前一天
-            productionDate: formData.get('productionDate'),
-            shelfLife: formData.get('shelfLife'),
-            shelfLifeUnit: shelfLifeUnit,
-            validity: formData.get('validity'),
-            createdAt: new Date().toISOString()
-        };
+// 把商品表单恢复成「添加商品」的初始状态：
+// 清空输入、撤掉编辑标记、提交按钮文字复原、收起「取消编辑」按钮。
+function resetProductForm() {
+    const form = document.getElementById('productForm');
+    if (!form) return;
 
-        products.push(product);
+    form.reset();
+    delete form.dataset.editingId;
 
-        saveProducts();
-        updateProductList();
-        updateChart();
-        updateReminder();
+    const submitBtn = document.querySelector('#productForm button[type="submit"]');
+    if (submitBtn) submitBtn.textContent = '添加商品';
 
-        e.target.reset();
-
-        alert('商品添加成功！');
-    }
+    const cancelBtn = document.getElementById('cancelEditBtn');
+    if (cancelBtn) cancelBtn.style.display = 'none';
 }
 
 // 保存商品数据
@@ -1030,14 +1020,21 @@ function updateProductList() {
         // 用原生 <select> 而不是自定义弹层：表格容器是 overflow:auto，
         // 绝对定位的菜单会被裁掉，而原生 select 的选项列表由系统绘制，不受影响。
         // 选项文字统一两个字；「撤销」= 撤销处置标记（只有已处理的行才有这一项）。
+        //
+        // 第一个 option 是占位项：value="" 不带任何动作，只负责「收起状态」显示两个汉字，
+        // hidden 让它在弹出的选项列表里不出现（列表里就只有下面那三项）。
+        // 之所以必须留占位项、不能直接把「编辑」设成默认选中项：浏览器只在值变化时触发
+        // change，若「编辑」本身就是选中项，用户再选它不会有任何事件，点了像坏了一样。
+        // 占位项用 hidden 而不是 disabled —— disabled 的选中项在某些浏览器里会渲染成灰色。
+        const placeholder = handled ? '撤销' : '编辑';
         const actions =
             '<select class="action-select" data-key="' + escapeHtml(rowKey) + '"' +
                     ' onchange="handleRowAction(this)">' +
-                '<option value="" selected>操作</option>' +
+                '<option value="" selected hidden>' + placeholder + '</option>' +
                 (handled
                     ? '<option value="undo">撤销</option>'
-                    : '<option value="edit">编辑</option>' +
-                      '<option value="handle">处理</option>') +
+                    : '<option value="handle">处理</option>' +
+                      '<option value="edit">编辑</option>') +
                 '<option value="delete">删除</option>' +
             '</select>';
 
@@ -1301,14 +1298,17 @@ window.editProduct = function(id) {
         document.getElementById('validity').value = product.validity;
 
         // 设置编辑模式
-        document.getElementById('productForm').dataset.editingId = id;
-        document.querySelector('#productForm button[type="submit"]').textContent = '更新商品';
+        setEditMode(id);
+
+        // 表单在列表上方：手机上不滚过去的话，点完「编辑」屏幕毫无反应，会以为坏了
+        const formSection = document.querySelector('.form-section');
+        if (formSection) formSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (error) {
         console.error('编辑功能执行失败:', error);
     }
 };
 
-// 操作列下拉框的分发：选中即执行，然后把选择复位成「操作」占位项。
+// 操作列下拉框的分发：选中即执行，然后把选择复位回占位项。
 // 复位是必须的 —— 浏览器只在值发生变化时触发 change，
 // 不复位的话连着两次选「编辑」，第二次会因为值没变而完全没反应。
 window.handleRowAction = function(select) {
@@ -1321,6 +1321,29 @@ window.handleRowAction = function(select) {
     else if (action === 'handle') openHandleDialog(key);
     else if (action === 'undo') undoHandle(key);
     else if (action === 'delete') deleteProduct(key);
+};
+
+// 切换商品表单的「添加 / 编辑」两种状态。
+// 编辑状态下提交按钮改成「保存为新记录」——编辑不再原地覆盖而是新增一条，
+// 按钮上继续写「更新商品」就是在骗人。
+function setEditMode(editingId) {
+    const form = document.getElementById('productForm');
+    if (!form) return;
+
+    if (editingId) form.dataset.editingId = editingId;
+    else delete form.dataset.editingId;
+
+    const submitBtn = document.querySelector('#productForm button[type="submit"]');
+    if (submitBtn) submitBtn.textContent = editingId ? '保存为新记录' : '添加商品';
+
+    const cancelBtn = document.getElementById('cancelEditBtn');
+    if (cancelBtn) cancelBtn.style.display = editingId ? 'inline-block' : 'none';
+}
+
+// 取消编辑：把表单和编辑状态清干净（点过「编辑」之后原来是没有退路的）
+window.cancelEdit = function() {
+    resetProductForm();
+    showToast('已取消编辑', '#9e9e9e');
 };
 
 // 删除商品（全局函数，以便HTML onclick事件调用）

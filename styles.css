@@ -503,10 +503,11 @@ td .btn {
 
 /* ===== 操作列：三个按钮收进一个下拉框 ===== */
 /* 并排三个按钮要占 ~140px，手机上光这一列就把「商品名称」顶出屏幕；
-   换成一个两字宽的下拉框后只占 ~70px。
-   不要给 select 写 width:100%：单元格是 nowrap，宽度跟着内容走才不会忽宽忽窄 */
+   收成一个下拉框后只占 80px。
+   宽度写死而不是 width:100%：单元格是 nowrap，交给浏览器自己算会忽宽忽窄；
+   80px 是「两个汉字 + 下拉箭头」的量，再窄就会被截成一个字 */
 #productTable td .action-select {
-    max-width: 84px;
+    width: 80px;
     min-height: 32px;
     padding: 4px 2px;
     font-size: 12px;
