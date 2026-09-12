@@ -62,6 +62,22 @@ section h2 {
     min-width: 200px;
 }
 
+/* 保质期 = 数量 + 单位 */
+.shelf-life-wrapper {
+    display: flex;
+    gap: 8px;
+}
+
+.shelf-life-wrapper input {
+    flex: 1;
+    min-width: 0;
+}
+
+.shelf-life-wrapper select {
+    width: 96px;
+    flex-shrink: 0;
+}
+
 label {
     display: block;
     margin-bottom: 5px;
@@ -71,12 +87,15 @@ label {
 
 input[type="text"],
 input[type="number"],
-input[type="date"] {
+input[type="date"],
+select {
     width: 100%;
     padding: 10px;
     border: 1px solid #ddd;
     border-radius: 4px;
     font-size: 14px;
+    background-color: #fff;
+    color: #333;
 }
 
 input:focus {
@@ -132,6 +151,25 @@ input:focus {
 
 .btn-info:hover {
     background-color: #e68900;
+}
+
+/* JS 里用到了 btn-warning / btn-success，补上样式 */
+.btn-warning {
+    background-color: #ff9800;
+    color: white;
+}
+
+.btn-warning:hover {
+    background-color: #e68900;
+}
+
+.btn-success {
+    background-color: #4CAF50;
+    color: white;
+}
+
+.btn-success:hover {
+    background-color: #45a049;
 }
 
 /* 控制按钮区域 */
@@ -338,6 +376,88 @@ td .btn {
     color: white;
 }
 
+.status-unknown {
+    background-color: #bdbdbd;
+    color: #424242;
+}
+
+/* ===== 到期提醒横幅 ===== */
+.reminder-banner {
+    background-color: #fff8e1;
+    border-left: 6px solid #ff9800;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+
+/* 有已过期商品时整体转为红色警示 */
+.reminder-banner-expired {
+    background-color: #ffebee;
+    border-left-color: #f44336;
+}
+
+.reminder-title {
+    font-size: 16px;
+    font-weight: bold;
+    color: #e65100;
+    margin-bottom: 8px;
+}
+
+.reminder-banner-expired .reminder-title {
+    color: #c62828;
+}
+
+.reminder-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.reminder-item {
+    font-size: 13px;
+    line-height: 1.5;
+    color: #424242;
+    font-weight: 500;
+}
+
+.reminder-item-expired {
+    color: #c62828;
+}
+
+.reminder-item-danger {
+    color: #e65100;
+}
+
+.reminder-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 10px;
+}
+
+.reminder-actions .btn {
+    width: auto;
+}
+
+/* ===== 过期 / 临期商品整行底色（配合列表置顶） ===== */
+#productTable tbody tr.row-expired {
+    background-color: #ffebee;
+}
+
+#productTable tbody tr.row-danger {
+    background-color: #fff8e1;
+}
+
+@media (max-width: 768px) {
+    .reminder-actions {
+        flex-direction: column;
+    }
+
+    .reminder-actions .btn {
+        width: 100%;
+    }
+}
+
 /* 响应式设计 */
 @media (max-width: 768px) {
     .container {
@@ -363,5 +483,174 @@ td .btn {
     
     th, td {
         padding: 8px;
+    }
+}
+
+/* ===== 手机端增强（触屏操作友好） ===== */
+@media (max-width: 768px) {
+    header {
+        padding: 15px 10px;
+        margin-bottom: 15px;
+    }
+
+    header h1 {
+        font-size: 1.4rem;
+    }
+
+    section h2 {
+        font-size: 1.15rem;
+    }
+
+    /* 输入框放大，避免 iOS 自动缩放 */
+    input[type="text"],
+    input[type="number"],
+    input[type="date"] {
+        font-size: 16px;
+        padding: 12px;
+    }
+
+    /* 功能按钮加大点击区域 */
+    .controls .btn,
+    .form-section .btn {
+        padding: 14px 20px;
+        font-size: 15px;
+        margin-bottom: 8px;
+    }
+
+    /* 表格内操作按钮加大，方便手指点击 */
+    td .btn {
+        padding: 7px 10px;
+        font-size: 12px;
+        min-width: 48px;
+        margin-bottom: 4px;
+    }
+
+    .status {
+        font-size: 11px;
+        padding: 4px 8px;
+        min-width: 46px;
+    }
+
+    /* 列表滚动区域加高，减少来回滚动 */
+    .list-section .scrollable-content,
+    .mapping-section .scrollable-content {
+        max-height: 380px;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .chart-section {
+        height: 300px;
+        padding: 12px;
+        margin-bottom: 20px;
+    }
+
+    .list-section,
+    .mapping-section {
+        margin-top: 20px;
+    }
+}
+
+/* 条码输入组 */
+.barcode-input-wrapper {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.barcode-input-wrapper input[type="text"] {
+    flex: 1;
+}
+
+.btn-scan {
+    padding: 10px 12px;
+    background-color: #2196F3;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+}
+
+.btn-scan:hover {
+    background-color: #0b7dda;
+}
+
+/* 扫码弹窗 */
+.scanner-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.7);
+    z-index: 3000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.scanner-content {
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    max-width: 480px;
+    width: 100%;
+    text-align: center;
+}
+
+.scanner-content h3 {
+    margin-bottom: 15px;
+    color: #333;
+}
+
+.scanner-content #reader {
+    width: 100%;
+    margin-bottom: 10px;
+    min-height: 150px;
+    background-color: #000;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.scanner-content #reader video {
+    width: 100%;
+    display: block;
+    border-radius: 8px;
+}
+
+.scanner-hint {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: #666;
+    line-height: 1.5;
+}
+
+.scanner-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+}
+
+/* 小屏适配 */
+@media (max-width: 480px) {
+    /* 手机上让取景框铺满屏幕。解码用的画布就是这块预览区域，
+       越宽条码占的像素越多，识别得越快越准 */
+    .scanner-modal {
+        padding: 0;
+        align-items: flex-start;
+    }
+
+    .scanner-content {
+        padding: 12px;
+        max-width: 100%;
+        min-height: 100vh;
+        border-radius: 0;
+        box-sizing: border-box;
+    }
+
+    .scanner-hint {
+        font-size: 13px;
     }
 }

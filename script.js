@@ -1,83 +1,563 @@
-// 数据存储
+/* ============================================================
+ * 商品到期提醒系统
+ * 云端存储：腾讯云开发 CloudBase（替代已停服的 LeanCloud）
+ *
+ * 使用前必须完成的配置（详见 README.md）：
+ *   1. 注册腾讯云开发 https://tcb.cloud.tencent.com/ 并创建环境
+ *   2. 把下面的 ENV_ID 替换成你自己的「环境 ID」
+ *   3. 控制台开启「匿名登录」，并把 Product / Mapping 两个集合的
+ *      权限设置为「所有用户可读写」（否则换设备看不到数据）
+ * ============================================================ */
+
+/* ===================== 0. 云端配置 ===================== */
+const ENV_ID = 'trae-projects-4g5aob6ufac38569';   // CloudBase 环境 ID
+const ACCESS_KEY = '';                 // 一般留空；若报鉴权失败，再填 Publishable Key
+const PRODUCT_COLLECTION = 'Product';  // 商品集合名（需与云端一致）
+const MAPPING_COLLECTION = 'Mapping';  // 条码映射集合名（需与云端一致）
+const PAGE_SIZE = 1000;                // 单次查询上限（CloudBase 最大 1000 条）
+
+/* ---- GitHub 存储配置（供 GitHub Pages 版本使用）---- */
+const GH_OWNER = 'halcyon0207';        // GitHub 用户名
+const GH_REPO  = 'product-expiry';     // 存放数据的仓库名
+const GH_FILE  = 'data.json';          // 数据文件名
+const GH_API   = 'https://api.github.com';
+
+// 页面是否运行在 GitHub Pages 上；是则改用 GitHub 仓库作为数据存储
+const IS_GITHUB_PAGES = /\.github\.io$/i.test(location.hostname) ||
+                        /[?&]storage=github/i.test(location.search);   // 本地可用 ?storage=github 预览 GitHub 模式
+
+let cbApp = null;         // CloudBase 应用实例
+let cbDb = null;          // 数据库实例
+let cloudReady = false;   // 云端是否已就绪
+let cloudWatchers = [];   // 实时监听句柄
+
+let ghToken = localStorage.getItem('ghToken') || '';   // GitHub 访问令牌（只存在本机）
+let ghSha = null;         // 数据文件当前版本号（写入时必需）
+
+/* ===================== 1. 本地数据 ===================== */
 let products = JSON.parse(localStorage.getItem('products')) || [];
 let productMappings = JSON.parse(localStorage.getItem('productMappings')) || [];
 
-// LeanCloud 初始化
-const APP_ID = 'Cg0xX6uA9mETD5p7zQcTzk3m-gzGzoHsz'; // 用户提供的 LeanCloud App ID
-const APP_KEY = 'GAEgrcnZ3NRsEYvB1n6CyyGJ'; // 用户提供的 LeanCloud App Key
-const SERVER_URL = 'https://cg0xx6ua.lc-cn-n1-shared.com'; // 用户提供的 LeanCloud 服务器地址
+// 全局变量：当前显示模式（all 或 filter）
+let currentDisplayMode = 'all';
 
-// 添加LeanCloud初始化状态变量
-let leanCloudInitialized = false;
+// 全局搜索变量
+let productSearchQuery = '';
+let mappingSearchQuery = '';
 
-console.log('准备初始化LeanCloud:', { APP_ID, APP_KEY, SERVER_URL });
+// 图表实例
+let chart;
 
-try {
-    AV.init({
-        appId: APP_ID,
-        appKey: APP_KEY,
-        serverURL: SERVER_URL
+// 摄像头扫码实例
+let html5QrCode = null;
+
+/* ===================== 2. 通用提示 ===================== */
+function showToast(message, background, duration) {
+    background = background || '#2196F3';
+    duration = duration || 3000;
+
+    // 新提示出现时先清理旧的，避免“正在获取”这类长提示一直挂着
+    document.querySelectorAll('.toast-notification').forEach(function(el) {
+        if (el.parentNode) el.parentNode.removeChild(el);
     });
-    
-    leanCloudInitialized = true;
-    console.log('LeanCloud初始化完成:', { appId: AV.applicationId, serverURL: AV.serverURL, initialized: leanCloudInitialized });
-} catch (error) {
-    leanCloudInitialized = false;
-    console.error('LeanCloud初始化失败:', error);
-    // 显示初始化失败的提示
-    const initErrorNotification = document.createElement('div');
-    initErrorNotification.style.position = 'fixed';
-    initErrorNotification.style.top = '20px';
-    initErrorNotification.style.left = '50%';
-    initErrorNotification.style.transform = 'translateX(-50%)';
-    initErrorNotification.style.backgroundColor = '#f44336';
-    initErrorNotification.style.color = 'white';
-    initErrorNotification.style.padding = '15px';
-    initErrorNotification.style.borderRadius = '8px';
-    initErrorNotification.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
-    initErrorNotification.style.zIndex = '1000';
-    initErrorNotification.style.fontSize = '14px';
-    initErrorNotification.textContent = 'LeanCloud初始化失败，请检查配置和网络连接！';
-    document.body.appendChild(initErrorNotification);
-    
-    setTimeout(() => {
-        document.body.removeChild(initErrorNotification);
-    }, 5000);
+
+    const notification = document.createElement('div');
+    notification.className = 'toast-notification';
+    notification.style.position = 'fixed';
+    notification.style.top = '20px';
+    notification.style.left = '50%';
+    notification.style.transform = 'translateX(-50%)';
+    notification.style.backgroundColor = background;
+    notification.style.color = 'white';
+    notification.style.padding = '12px 20px';
+    notification.style.borderRadius = '8px';
+    notification.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+    notification.style.zIndex = '2000';
+    notification.style.fontSize = '14px';
+    notification.style.maxWidth = '80%';
+    notification.textContent = message;
+    document.body.appendChild(notification);
+
+    setTimeout(function() {
+        if (document.body.contains(notification)) {
+            document.body.removeChild(notification);
+        }
+    }, duration);
 }
 
-// 页面加载完成后初始化
-document.addEventListener('DOMContentLoaded', function() {
+/* ===================== 2.1 日期工具 ===================== */
+
+// 把 'YYYY-MM-DD' 解析成“本地时区”的当天 0 点。
+// 直接 new Date('2026-09-12') 是按 UTC 解析的，在国内会差一天。
+function parseDateLocal(value) {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(value || '').trim());
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return isNaN(d.getTime()) ? null : d;
+}
+
+// 输出 'YYYY-MM-DD'（本地时区）。不能用 toISOString，同样会偏一天。
+function formatDateLocal(date) {
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return date.getFullYear() + '-' + m + '-' + d;
+}
+
+function todayLocal() {
+    return formatDateLocal(new Date());
+}
+
+// 加 N 个月。1月31日 + 1个月会滚到 3 月，这里收敛到当月最后一天
+function addMonthsClamped(date, months) {
+    const day = date.getDate();
+    const target = new Date(date.getFullYear(), date.getMonth() + months, 1);
+    const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+    target.setDate(Math.min(day, lastDay));
+    return target;
+}
+
+/* ===================== 2.2 摄像头扫码 ===================== */
+
+let scannerTorchOn = false;
+
+// 只解零售商品常见的条码格式。ZXing 每帧少试一堆格式，速度提升很明显
+function retailBarcodeFormats() {
+    const F = typeof Html5QrcodeSupportedFormats !== 'undefined' ? Html5QrcodeSupportedFormats : null;
+    if (!F) return null;
+    return [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E,
+            F.CODE_128, F.CODE_39, F.ITF, F.CODABAR,
+            F.QR_CODE].filter(function(v) { return v !== undefined; });
+}
+
+// 优先选择后置摄像头
+function pickBackCameraId(cameras) {
+    const back = cameras.find(function(c) {
+        return /back|rear|environment|后置|背面/i.test(c.label || '');
+    });
+    return back ? back.id : cameras[cameras.length - 1].id;
+}
+
+function getVideoTrack() {
+    const video = document.querySelector('#reader video');
+    if (!video || !video.srcObject) return null;
+    const tracks = video.srcObject.getVideoTracks ? video.srcObject.getVideoTracks() : [];
+    return tracks && tracks.length ? tracks[0] : null;
+}
+
+// 只有带补光灯的设备才显示“开灯”按钮
+function setupTorch() {
+    const torchBtn = document.getElementById('torchBtn');
+    if (!torchBtn) return;
+
+    const track = getVideoTrack();
+    if (!track || typeof track.getCapabilities !== 'function') return;
+
+    let caps = {};
+    try { caps = track.getCapabilities() || {}; } catch (e) { return; }
+    if (caps.torch) torchBtn.style.display = 'inline-block';
+}
+
+// 超市、仓库光线暗的时候开补光灯，识别率提升很大
+async function toggleTorch() {
+    const torchBtn = document.getElementById('torchBtn');
+    const track = getVideoTrack();
+    if (!track) return;
+
+    scannerTorchOn = !scannerTorchOn;
+    try {
+        await track.applyConstraints({ advanced: [{ torch: scannerTorchOn }] });
+        if (torchBtn) {
+            torchBtn.textContent = scannerTorchOn ? '关灯' : '开灯';
+            torchBtn.classList.toggle('btn-info', !scannerTorchOn);
+            torchBtn.classList.toggle('btn-warning', scannerTorchOn);
+        }
+    } catch (e) {
+        scannerTorchOn = false;
+        showToast('这台设备不支持补光灯', '#ff9800');
+    }
+}
+
+function startScanner() {
+    const modal = document.getElementById('scannerModal');
+    if (!modal) return;
+
+    modal.style.display = 'flex';
+
+    const reader = document.getElementById('reader');
+    if (reader) reader.innerHTML = '';
+
+    const torchBtn = document.getElementById('torchBtn');
+    if (torchBtn) {
+        torchBtn.style.display = 'none';
+        torchBtn.textContent = '开灯';
+    }
+    scannerTorchOn = false;
+
+    if (typeof Html5Qrcode === 'undefined') {
+        showToast('扫码库未加载，请检查网络', '#ff9800');
+        stopScanner();
+        return;
+    }
+
+    const hasNativeDetector = typeof window.BarcodeDetector !== 'undefined';
+
+    const ctorOptions = {
+        verbose: false,
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+    };
+    // 原生 BarcodeDetector 支持哪些格式由浏览器决定，不要限制；
+    // 华为自带浏览器等不支持原生检测的会退回 ZXing，这时限定格式能明显提速
+    if (!hasNativeDetector) {
+        const formats = retailBarcodeFormats();
+        if (formats && formats.length) ctorOptions.formatsToSupport = formats;
+    }
+
+    html5QrCode = new Html5Qrcode('reader', ctorOptions);
+
+    Html5Qrcode.getCameras().then(function(cameras) {
+        if (!cameras || !cameras.length) {
+            showToast('未检测到摄像头', '#ff9800');
+            stopScanner();
+            return;
+        }
+
+        const cameraId = pickBackCameraId(cameras);
+
+        html5QrCode.start(
+            cameraId,
+            {
+                fps: 25,
+                disableFlip: true,
+                aspectRatio: 1.7777778,
+                // 一维条形码是横向长条，这里用“宽扁”识别区，方框会切掉条码
+                qrbox: function(w, h) {
+                    return {
+                        width: Math.floor(w * 0.92),
+                        height: Math.floor(h * 0.5)
+                    };
+                },
+                // 库默认不指定分辨率，手机可能给出很低的画质导致条码糊成一团。
+                // 解码画布只有预览那么大，源头给 1280x720 是清晰度和速度的平衡点
+                videoConstraints: {
+                    deviceId: { exact: cameraId },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
+            },
+            function(decodedText) {
+                try { if (navigator.vibrate) navigator.vibrate(60); } catch (e) {}
+                const barcodeInput = document.getElementById('barcode');
+                barcodeInput.value = decodedText;
+                handleBarcodeChange();
+                showToast('识别成功：' + decodedText, '#4CAF50', 2000);
+                stopScanner();
+            },
+            function() {
+                // 帧解析中的临时错误，静默忽略
+            }
+        ).then(function() {
+            setupTorch();
+        }).catch(function(err) {
+            console.error('启动摄像头失败:', err);
+            showToast('启动摄像头失败：' + (err.message || err), '#f44336');
+            stopScanner();
+        });
+    }).catch(function(err) {
+        console.error('获取摄像头失败:', err);
+        showToast('无法访问摄像头，请确认已授权', '#f44336');
+        stopScanner();
+    });
+}
+
+function stopScanner() {
+    const modal = document.getElementById('scannerModal');
+    if (modal) modal.style.display = 'none';
+
+    scannerTorchOn = false;
+
+    if (!html5QrCode) return;
+
+    var scanner = html5QrCode;
+    html5QrCode = null;
+    try {
+        scanner.stop().then(function() {
+            scanner.clear();
+        }).catch(function() {});
+    } catch (e) {
+        // 忽略停止扫码时的异常
+    }
+}
+
+/* ============ 3. 存储后端：GitHub（GitHub Pages 版本使用） ============
+ * 页面部署在 GitHub Pages 时，数据以 data.json 的形式存放在 GitHub 仓库里，
+ * 通过 GitHub 官方 API 读写。不需要服务器，也没有过期时间。
+ * ==================================================================== */
+
+function ghHeaders() {
+    const headers = { 'Accept': 'application/vnd.github+json' };
+    if (ghToken) headers['Authorization'] = 'Bearer ' + ghToken;
+    return headers;
+}
+
+// 首次使用：引导用户在本机保存一次访问令牌
+async function ensureGhToken() {
+    if (ghToken) return true;
+
+    const token = window.prompt(
+        '首次使用需要在本机保存一次 GitHub 访问令牌（Token）。\n\n' +
+        '保存后以后都不用再填。\n\n' +
+        '还没有令牌的话：\n' +
+        'GitHub 右上角头像 → Settings → Developer settings →\n' +
+        'Personal access tokens → Tokens (classic) →\n' +
+        'Generate new token (classic)，勾选 repo 权限，生成后复制过来。'
+    );
+
+    if (!token || !token.trim()) {
+        showToast('未填写令牌，暂时无法访问云端数据', '#ff9800');
+        return false;
+    }
+
+    ghToken = token.trim();
+    localStorage.setItem('ghToken', ghToken);
+    showToast('令牌已保存到本机', '#4CAF50');
+    return true;
+}
+
+// UTF-8 与 Base64 互转（GitHub API 以 Base64 传输文件内容）
+function encodeBase64Utf8(str) {
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+}
+
+function decodeBase64Utf8(b64) {
+    const binary = atob(String(b64).replace(/\s/g, ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+}
+
+// 读取仓库中的 data.json
+async function ghLoad() {
+    const url = GH_API + '/repos/' + GH_OWNER + '/' + GH_REPO +
+                '/contents/' + GH_FILE + '?t=' + Date.now();
+
+    const res = await fetch(url, { headers: ghHeaders(), cache: 'no-store' });
+
+    if (res.status === 404) {
+        ghSha = null;
+        return { products: [], mappings: [] };
+    }
+    if (res.status === 401 || res.status === 403) {
+        ghToken = '';
+        localStorage.removeItem('ghToken');
+        throw new Error('令牌无效或已过期，请重新填写');
+    }
+    if (!res.ok) {
+        throw new Error('读取数据失败（HTTP ' + res.status + '）');
+    }
+
+    const json = await res.json();
+    ghSha = json.sha;
+
+    let parsed = {};
+    try {
+        parsed = JSON.parse(decodeBase64Utf8(json.content) || '{}');
+    } catch (e) {
+        parsed = {};
+    }
+
+    return {
+        products: parsed.products || [],
+        mappings: parsed.mappings || []
+    };
+}
+
+// 把数据写回仓库中的 data.json（全量覆盖）
+async function ghSave(newProducts, newMappings, message, isRetry) {
+    const payload = JSON.stringify({
+        products: newProducts,
+        mappings: newMappings,
+        updatedAt: new Date().toISOString()
+    }, null, 2);
+
+    const body = {
+        message: message || ('更新数据 ' + new Date().toLocaleString('zh-CN')),
+        content: encodeBase64Utf8(payload)
+    };
+    if (ghSha) body.sha = ghSha;
+
+    const res = await fetch(
+        GH_API + '/repos/' + GH_OWNER + '/' + GH_REPO + '/contents/' + GH_FILE,
+        {
+            method: 'PUT',
+            headers: Object.assign({ 'Content-Type': 'application/json' }, ghHeaders()),
+            body: JSON.stringify(body)
+        }
+    );
+
+    // 版本冲突：重新读取最新版本后重试一次
+    if (res.status === 409 && !isRetry) {
+        await ghLoad();
+        return ghSave(newProducts, newMappings, message, true);
+    }
+    if (res.status === 401 || res.status === 403) {
+        ghToken = '';
+        localStorage.removeItem('ghToken');
+        throw new Error('令牌无效或已过期，请重新填写');
+    }
+    if (!res.ok) {
+        const err = await res.json().catch(function() { return {}; });
+        throw new Error(err.message || ('写入数据失败（HTTP ' + res.status + '）'));
+    }
+
+    const json = await res.json();
+    ghSha = (json.content && json.content.sha) || ghSha;
+    return json;
+}
+
+/* ===================== 4. CloudBase 初始化 ===================== */
+
+// CloudBase SDK 有几百 KB，只在真的要用云端同步时才下载，避免拖慢首屏
+const CB_SDK_URL = 'https://static.cloudbase.net/cloudbase-js-sdk/3.9.3/cloudbase.full.js';
+let cbSdkLoading = null;
+
+function loadScriptOnce(src) {
+    if (cbSdkLoading) return cbSdkLoading;
+
+    cbSdkLoading = new Promise(function(resolve, reject) {
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = function() { resolve(true); };
+        script.onerror = function() {
+            cbSdkLoading = null;   // 允许下次重试
+            reject(new Error('脚本加载失败：' + src));
+        };
+        document.head.appendChild(script);
+    });
+
+    return cbSdkLoading;
+}
+
+async function initCloudBase() {
+    if (cloudReady) return true;
+
+    if (!ENV_ID || ENV_ID === 'your-env-id') {
+        console.warn('尚未配置 CloudBase 环境 ID，云端同步功能不可用');
+        return false;
+    }
+    if (typeof cloudbase === 'undefined') {
+        try {
+            await loadScriptOnce(CB_SDK_URL);
+        } catch (err) {
+            console.error('CloudBase SDK 加载失败:', err);
+            return false;
+        }
+    }
+    if (typeof cloudbase === 'undefined') {
+        console.error('CloudBase SDK 加载失败，云端同步不可用');
+        return false;
+    }
+
+    try {
+        const options = { env: ENV_ID };
+        if (ACCESS_KEY) options.accessKey = ACCESS_KEY;
+
+        cbApp = cloudbase.init(options);
+
+        // 匿名登录（兼容 SDK 的不同版本写法）
+        if (cbApp.auth && typeof cbApp.auth.signInAnonymously === 'function') {
+            const res = await cbApp.auth.signInAnonymously();
+            if (res && res.error) throw new Error(res.error.message || '匿名登录失败');
+        } else if (typeof cbApp.auth === 'function') {
+            await cbApp.auth({ persistence: 'local' }).anonymousAuthProvider().signIn();
+        } else {
+            throw new Error('当前 SDK 不支持匿名登录，请确认控制台已开启「匿名登录」');
+        }
+
+        cbDb = cbApp.database();
+        cloudReady = true;
+        console.log('CloudBase 初始化成功，环境：', ENV_ID);
+    } catch (error) {
+        cloudReady = false;
+        console.error('CloudBase 初始化失败:', error);
+        showToast('云端连接失败：' + (error.message || '未知错误'), '#f44336', 5000);
+    }
+    return cloudReady;
+}
+
+// 确保云端可用（未初始化则尝试初始化，并给出新手提示）
+async function ensureCloud() {
+    if (cloudReady) return true;
+
+    const ok = await initCloudBase();
+    if (!ok) {
+        alert('云端尚未连接成功。\n\n请依次检查：\n' +
+              '1. script.js 中的 ENV_ID 是否已替换为你的环境 ID\n' +
+              '2. CloudBase 控制台是否已开启「匿名登录」\n' +
+              '3. 数据库权限是否设置为「所有用户可读写」\n' +
+              '4. 网络连接是否正常');
+    }
+    return ok;
+}
+
+// 分页拉取集合的全部数据
+async function fetchAllFromCloud(collectionName) {
+    const all = [];
+    let skip = 0;
+
+    while (true) {
+        const res = await cbDb.collection(collectionName).skip(skip).limit(PAGE_SIZE).get();
+        if (res && res.code) {
+            throw new Error(res.message || ('查询失败：' + res.code));
+        }
+        const batch = (res && res.data) || [];
+        all.push.apply(all, batch);
+        if (batch.length < PAGE_SIZE) break;
+        skip += PAGE_SIZE;
+    }
+
+    return all;
+}
+
+/* ===================== 4. 页面初始化 ===================== */
+document.addEventListener('DOMContentLoaded', async function() {
     initializeApp();
-    
-    // 初始化实时数据监听
-    initializeLiveQuery();
+
+    if (IS_GITHUB_PAGES) {
+        // GitHub Pages 版本：数据存放在 GitHub 仓库，不使用 CloudBase
+        console.log('运行于 GitHub Pages，数据存储：GitHub 仓库');
+        return;
+    }
+
+    // CloudBase 版本：初始化云端连接，再启动实时数据监听
+    await initCloudBase();
+    startRealtimeWatch();
 });
 
 function initializeApp() {
-    console.log('initializeApp函数被调用');
     // 绑定事件监听器
     bindEventListeners();
-    
+
     // 加载数据
     loadData();
-    
-    // 更新商品列表
+
+    // 更新列表
     updateProductList();
-    
-    // 更新映射列表
     updateMappingList();
-    
+
     // 初始化图表
     initializeChart();
-    
+
+    // 打开页面就提醒已过期的商品（每天最多弹一次）
+    alertExpiredOnce();
+
     // 确保添加商品表单默认为空
     try {
         const productForm = document.getElementById('productForm');
         if (productForm) {
             productForm.reset();
-            console.log('表单已重置');
-        } else {
-            console.error('未找到商品表单');
         }
     } catch (error) {
         console.error('重置表单失败:', error);
@@ -87,57 +567,73 @@ function initializeApp() {
 function bindEventListeners() {
     // 商品表单提交
     document.getElementById('productForm').addEventListener('submit', handleProductSubmit);
-    
+
     // 条码输入变化
     document.getElementById('barcode').addEventListener('input', handleBarcodeChange);
-    
+
+    // 摄像头扫码
+    const scanBtn = document.getElementById('scanBtn');
+    if (scanBtn) scanBtn.addEventListener('click', startScanner);
+    const stopScanBtn = document.getElementById('stopScanBtn');
+    if (stopScanBtn) stopScanBtn.addEventListener('click', stopScanner);
+    const torchBtn = document.getElementById('torchBtn');
+    if (torchBtn) torchBtn.addEventListener('click', toggleTorch);
+
+    // 点击遮罩关闭扫码弹窗
+    const scannerModal = document.getElementById('scannerModal');
+    if (scannerModal) {
+        scannerModal.addEventListener('click', function(e) {
+            if (e.target === scannerModal) stopScanner();
+        });
+    }
+
     // 生产日期或保质期变化时自动计算到期日期
     document.getElementById('productionDate').addEventListener('change', calculateExpiryDate);
     document.getElementById('shelfLife').addEventListener('input', calculateExpiryDate);
-    
+
     // 导出CSV
     document.getElementById('exportBtn').addEventListener('click', exportToCSV);
-    
+
     // 导入CSV
     document.getElementById('importBtn').addEventListener('click', function() {
         document.getElementById('importFile').click();
     });
     document.getElementById('importFile').addEventListener('change', importFromCSV);
-    
+
     // 清空所有数据
     document.getElementById('clearBtn').addEventListener('click', clearAllData);
-    
-    // 同步数据
+
+    // 同步数据到云端
     document.getElementById('syncBtn').addEventListener('click', syncData);
-    
-    // 获取最新数据
+
+    // 从云端获取最新数据
     document.getElementById('fetchBtn').addEventListener('click', fetchLatestDataFromCloud);
-    
+
     // 筛选1个月内到期商品
     document.getElementById('filterBtn').addEventListener('click', filterOneMonthExpiry);
-    
+
     // 添加映射
     document.getElementById('addMappingBtn').addEventListener('click', addMapping);
-    
+
     // 商品列表搜索
     document.getElementById('productSearchBtn').addEventListener('click', function() {
         productSearchQuery = document.getElementById('productSearch').value;
         updateProductList();
     });
-    
+
     // 商品列表清空搜索
     document.getElementById('productClearSearchBtn').addEventListener('click', function() {
         document.getElementById('productSearch').value = '';
         productSearchQuery = '';
         updateProductList();
     });
-    
+
     // 映射列表搜索
     document.getElementById('mappingSearchBtn').addEventListener('click', function() {
         mappingSearchQuery = document.getElementById('mappingSearch').value;
         updateMappingList();
     });
-    
+
     // 映射列表清空搜索
     document.getElementById('mappingClearSearchBtn').addEventListener('click', function() {
         document.getElementById('mappingSearch').value = '';
@@ -146,102 +642,111 @@ function bindEventListeners() {
     });
 }
 
+/* ===================== 5. 商品表单 ===================== */
 // 处理条码输入变化
 function handleBarcodeChange() {
-    const barcode = document.getElementById('barcode').value;
+    const barcode = document.getElementById('barcode').value.trim();
     const productNameInput = document.getElementById('productName');
-    
+
     // 查找映射
-    const mapping = productMappings.find(item => item.barcode === barcode);
-    if (mapping) {
-        productNameInput.value = mapping.productName;
-    } else {
-        productNameInput.value = '';
-    }
+    const mapping = productMappings.find(function(item) { return item.barcode === barcode; });
+    // 只有查到映射才覆盖名称；查不到时保留手填内容，不要清空
+    if (mapping) productNameInput.value = mapping.productName;
 }
 
-// 计算到期日期
+// 计算到期日期（保质期支持 天 / 月 / 年）
 function calculateExpiryDate() {
-    const productionDate = document.getElementById('productionDate').value;
-    const shelfLife = document.getElementById('shelfLife').value;
+    const productionDate = parseDateLocal(document.getElementById('productionDate').value);
+    const shelfLifeInput = document.getElementById('shelfLife');
+    const unitInput = document.getElementById('shelfLifeUnit');
     const validityInput = document.getElementById('validity');
-    
-    if (productionDate && shelfLife) {
-        const date = new Date(productionDate);
-        date.setMonth(date.getMonth() + parseInt(shelfLife));
-        validityInput.value = date.toISOString().split('T')[0];
+
+    if (!productionDate) return;
+
+    const amount = parseInt(shelfLifeInput.value, 10);
+    if (!amount || amount <= 0) return;
+
+    const unit = unitInput ? unitInput.value : '月';
+    let expiry;
+
+    if (unit === '天') {
+        // 鲜奶、面包这类按天算的保质期
+        expiry = new Date(productionDate.getTime());
+        expiry.setDate(expiry.getDate() + amount);
+    } else if (unit === '年') {
+        expiry = addMonthsClamped(productionDate, amount * 12);
+    } else {
+        expiry = addMonthsClamped(productionDate, amount);
     }
+
+    validityInput.value = formatDateLocal(expiry);
 }
 
 // 处理商品表单提交
 function handleProductSubmit(e) {
     e.preventDefault();
-    
+
     const formData = new FormData(e.target);
     const isEditing = e.target.dataset.editingId;
-    
+
+    const shelfLifeUnitInput = document.getElementById('shelfLifeUnit');
+    const shelfLifeUnit = shelfLifeUnitInput ? shelfLifeUnitInput.value : '月';
+
     if (isEditing) {
-        // 编辑模式: 更新现有商品
-        // 不再使用parseInt，保持id的原始类型（可能是字符串或数字）
+        // 编辑模式：按 uid 定位（老记录兜底用数字 id）
         const productId = isEditing;
-        const productIndex = products.findIndex(p => p.id == productId); // 使用==进行宽松比较
-        
+        const productIndex = products.findIndex(function(p) {
+            return (p.uid && String(p.uid) === String(productId)) || String(p.id) === String(productId);
+        });
+
         if (productIndex !== -1) {
-            products[productIndex] = {
-                ...products[productIndex],
+            products[productIndex] = Object.assign({}, products[productIndex], {
+                uid: products[productIndex].uid || makeUid(),
                 barcode: formData.get('barcode'),
                 productName: formData.get('productName'),
-                // 类型和扫描日期字段不再从表单获取，但保持现有值
                 productionDate: formData.get('productionDate'),
                 shelfLife: formData.get('shelfLife'),
+                shelfLifeUnit: shelfLifeUnit,
                 validity: formData.get('validity')
-            };
-            
+            });
+
             saveProducts();
             updateProductList();
             updateChart();
-            
+            updateReminder();
+
             // 重置表单和编辑状态
             e.target.reset();
             delete e.target.dataset.editingId;
             document.querySelector('#productForm button[type="submit"]').textContent = '添加商品';
-            
-            // 取消自动同步，仅通过手动点击按钮触发
-            
+
             alert('商品更新成功！');
         }
     } else {
-        // 添加模式: 创建新商品
-        const today = new Date().toISOString().split('T')[0];
+        // 添加模式：创建新商品
         const product = {
-            id: Date.now(),
+            uid: makeUid(),        // 唯一标识：同条码的不同批次靠它区分，同步时不会互相覆盖
+            id: Date.now() + Math.floor(Math.random() * 1000),
             barcode: formData.get('barcode'),
             productName: formData.get('productName'),
-            type: '商品', // 默认类型为"商品"
-            scanDate: today, // 默认扫描日期为当前日期
+            type: '商品',          // 默认类型为"商品"
+            scanDate: todayLocal(), // 按本地日期记录，避免晚上录入被记成前一天
             productionDate: formData.get('productionDate'),
             shelfLife: formData.get('shelfLife'),
+            shelfLifeUnit: shelfLifeUnit,
             validity: formData.get('validity'),
             createdAt: new Date().toISOString()
         };
-        
-        // 添加到商品列表
+
         products.push(product);
-        
-        // 保存到本地存储
+
         saveProducts();
-        
-        // 更新列表
         updateProductList();
-        
-        // 更新图表
         updateChart();
-        
-        // 重置表单
+        updateReminder();
+
         e.target.reset();
-        
-        // 取消自动同步，仅通过手动点击按钮触发
-        
+
         alert('商品添加成功！');
     }
 }
@@ -256,52 +761,63 @@ function saveMappings() {
     localStorage.setItem('productMappings', JSON.stringify(productMappings));
 }
 
-// 全局变量：当前显示模式（all 或 filter）
-let currentDisplayMode = 'all';
+/* ===================== 6. 列表渲染 ===================== */
 
-// 全局搜索变量
-let productSearchQuery = '';
-let mappingSearchQuery = '';
+// 防止导入的 CSV 里带有 HTML 破坏页面
+function escapeHtml(value) {
+    return String(value === undefined || value === null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+// 保质期显示，例如“12个月”“7天”；旧数据没有单位时按“月”处理
+function formatShelfLife(product) {
+    if (!product || !product.shelfLife) return '-';
+    const unit = product.shelfLifeUnit || '月';
+    return product.shelfLife + (unit === '月' ? '个月' : unit);
+}
 
 // 更新商品列表
 function updateProductList() {
-    console.log('updateProductList函数被调用，原始商品数量:', products.length);
     const tbody = document.querySelector('#productTable tbody');
     tbody.innerHTML = '';
-    
+
     // 获取要显示的商品列表
-    let displayProducts = [...products];
-    
+    let displayProducts = products.slice();
+
     // 如果是筛选模式，只显示1个月内到期的商品
     if (currentDisplayMode === 'filter') {
-        displayProducts = displayProducts.filter(product => {
+        displayProducts = displayProducts.filter(function(product) {
             const status = getExpiryStatus(product.validity);
             return status === 'danger' || status === 'expired';
         });
     }
-    
+
     // 应用搜索过滤
     if (productSearchQuery) {
         const query = productSearchQuery.toLowerCase();
-        displayProducts = displayProducts.filter(p => 
-            p.productName.toLowerCase().includes(query) || p.barcode.includes(query)
-        );
+        displayProducts = displayProducts.filter(function(p) {
+            return (p.productName || '').toLowerCase().includes(query) ||
+                   (p.barcode || '').includes(query);
+        });
     }
-    
-    // 按到期日期排序（已过期的排前面，然后按有效期从近到远）
-    const sortedProducts = displayProducts.sort((a, b) => {
-        const dateA = new Date(a.validity);
-        const dateB = new Date(b.validity);
-        const result = dateA - dateB;
-        return result;
+
+    // 按到期日期排序：已过期 / 快到期排前面，没填有效期的排最后
+    const sortedProducts = displayProducts.sort(function(a, b) {
+        const da = parseDateLocal(a.validity);
+        const db = parseDateLocal(b.validity);
+        if (!da && !db) return 0;
+        if (!da) return 1;
+        if (!db) return -1;
+        return da - db;
     });
-    
-    console.log('显示商品列表:', sortedProducts);
-    
-    sortedProducts.forEach((product, index) => {
+
+    sortedProducts.forEach(function(product, index) {
         const row = document.createElement('tr');
         const status = getExpiryStatus(product.validity);
-        
+
         // 筛选模式下高亮显示关键信息
         let nameStyle = '';
         let validityStyle = '';
@@ -311,34 +827,41 @@ function updateProductList() {
             validityStyle = ' style="font-weight: bold; color: red;"';
             actionStyle = ' style="font-weight: bold;"';
         }
-        
+
+        // 已过期 / 30 天内到期的整行加底色，配合末尾的排序做到「临期置顶一眼可见」
+        if (status === 'expired') row.classList.add('row-expired');
+        else if (status === 'danger') row.classList.add('row-danger');
+
+        const rowKey = product.uid || product.id;
+
         row.innerHTML = `
             <td>${index + 1}</td>
-            <td${validityStyle}>${product.validity}</td>
-            <td><span class="status status-${status}">${getStatusText(status)}</span></td>
-            <td${nameStyle}>${product.productName}</td>
-            <td>${product.type}</td>
-            <td>${product.scanDate}</td>
-            <td>${product.productionDate || '-'}</td>
-            <td>${product.shelfLife || '-'}</td>
-            <td>${product.barcode}</td>
+            <td${validityStyle}>${escapeHtml(product.validity) || '-'}</td>
+            <td><span class="status status-${status}">${getStatusLabel(product.validity)}</span></td>
+            <td${nameStyle}>${escapeHtml(product.productName)}</td>
+            <td>${escapeHtml(product.type)}</td>
+            <td>${escapeHtml(product.scanDate)}</td>
+            <td>${escapeHtml(product.productionDate) || '-'}</td>
+            <td>${formatShelfLife(product)}</td>
+            <td>${escapeHtml(product.barcode)}</td>
             <td${actionStyle}>
-                <button class="btn btn-secondary" onclick="editProduct('${product.id}')">编辑</button>
-                <button class="btn btn-danger" onclick="deleteProduct('${product.id}')">删除</button>
+                <button class="btn btn-secondary" onclick="editProduct('${rowKey}')">编辑</button>
+                <button class="btn btn-danger" onclick="deleteProduct('${rowKey}')">删除</button>
             </td>
         `;
-        
+
         tbody.appendChild(row);
     });
+
+    // 列表变了，顶部的到期提醒跟着刷新
+    updateReminder();
 }
 
 // 筛选1个月内到期的商品
 function filterOneMonthExpiry() {
-    console.log('开始筛选1个月内到期的商品');
-    
     // 切换显示模式
     currentDisplayMode = currentDisplayMode === 'all' ? 'filter' : 'all';
-    
+
     // 更新按钮文本
     const filterBtn = document.getElementById('filterBtn');
     if (currentDisplayMode === 'filter') {
@@ -350,21 +873,28 @@ function filterOneMonthExpiry() {
         filterBtn.classList.remove('btn-success');
         filterBtn.classList.add('btn-warning');
     }
-    
+
     // 更新商品列表
     updateProductList();
 }
 
+// 距离到期还有多少天（按本地日历日算：今天到期是 0，昨天到期是 -1）
+function getDaysLeft(validity) {
+    const expiry = parseDateLocal(validity);
+    if (!expiry) return null;
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return Math.round((expiry - today) / 86400000);
+}
+
 // 获取到期状态
 function getExpiryStatus(validity) {
-    const today = new Date();
-    const expiry = new Date(validity);
-    const diffTime = expiry - today;
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
-    if (diffDays < 0) return 'expired';
-    if (diffDays <= 30) return 'danger';
-    if (diffDays <= 90) return 'warning';
+    const days = getDaysLeft(validity);
+    if (days === null) return 'unknown';   // 没填有效期，不能当成“正常”
+    if (days < 0) return 'expired';
+    if (days <= 30) return 'danger';
+    if (days <= 90) return 'warning';
     return 'normal';
 }
 
@@ -374,243 +904,150 @@ function getStatusText(status) {
         normal: '正常',
         warning: '1-3个月',
         danger: '1个月内',
-        expired: '已过期'
+        expired: '已过期',
+        unknown: '无有效期'
     };
     return statusMap[status] || status;
 }
 
-// 编辑商品（全局函数，以便HTML onclick事件调用）
-window.editProduct = function(id) {
-    console.log('editProduct函数被调用，id:', id, '类型:', typeof id);
-    console.log('当前商品列表:', products.map(p => ({ id: p.id, type: typeof p.id })));
-    
-    // 尝试使用不同的比较方式查找商品
-    let product = products.find(p => p.id === id);
-    console.log('使用===查找结果:', product);
-    
-    if (!product) {
-        product = products.find(p => p.id == id);
-        console.log('使用==查找结果:', product);
-    }
-    
-    if (!product) {
-        product = products.find(p => String(p.id) === String(id));
-        console.log('使用字符串转换查找结果:', product);
-    }
-    
-    if (!product) {
-        console.log('未找到商品，id:', id);
-        alert('未找到指定商品');
-        return;
-    }
-    
-    try {
-        // 填充表单（只填充仍然存在的字段）
-        document.getElementById('barcode').value = product.barcode;
-        document.getElementById('productName').value = product.productName;
-        document.getElementById('productionDate').value = product.productionDate;
-        document.getElementById('shelfLife').value = product.shelfLife;
-        document.getElementById('validity').value = product.validity;
-        
-        // 设置编辑模式
-        document.getElementById('productForm').dataset.editingId = id;
-        
-        // 修改提交按钮文本
-        document.querySelector('#productForm button[type="submit"]').textContent = '更新商品';
-        
-        console.log('编辑功能执行成功');
-    } catch (error) {
-        console.error('编辑功能执行失败:', error);
-    }
+// 列表状态列用的短标签：直接写“还剩几天”，比“1个月内”更直观
+function getStatusLabel(validity) {
+    const days = getDaysLeft(validity);
+    if (days === null) return '未填有效期';
+    if (days < 0) return '过期' + Math.abs(days) + '天';
+    if (days === 0) return '今天到期';
+    return '剩' + days + '天';
 }
 
-// 删除商品（全局函数，以便HTML onclick事件调用）
-window.deleteProduct = function(id) {
-    console.log('deleteProduct函数被调用，id:', id, '类型:', typeof id);
-    console.log('删除前商品列表:', products.length, '条');
-    
-    if (confirm('确定要删除这个商品吗？')) {
-        // 使用多种比较方式确保兼容不同类型的ID
-        const initialLength = products.length;
-        
-        // 先找到要删除的商品对象，以便获取条码信息
-        const productToDelete = products.find(p => {
-            return p.id === id || p.id == id || String(p.id) === String(id);
-        });
-        
-        products = products.filter(p => {
-            const match = p.id !== id && p.id != id && String(p.id) !== String(id);
-            if (!match) {
-                console.log('删除商品:', p);
-            }
-            return match;
-        });
-        
-        console.log('删除后商品列表:', products.length, '条', '删除了:', initialLength - products.length, '条');
-        
-        saveProducts();
-        updateProductList();
-        updateChart();
-        
-        // 同步删除LeanCloud中的数据
-        if (productToDelete && APP_ID !== 'your_app_id' && APP_KEY !== 'your_app_key') {
-            // 检查LeanCloud是否初始化成功
-            if (!leanCloudInitialized) {
-                console.log('LeanCloud尚未初始化，跳过云端删除操作');
-                return;
-            }
-            
-            console.log('开始同步删除LeanCloud中的商品数据，条码:', productToDelete.barcode);
-            try {
-                const Product = AV.Object.extend('Product');
-                const query = new AV.Query(Product);
-                query.equalTo('barcode', productToDelete.barcode);
-                query.first().then(existingProduct => {
-                    if (existingProduct) {
-                        console.log('在LeanCloud中找到对应商品，开始删除:', existingProduct);
-                        return existingProduct.destroy();
-                    } else {
-                        console.log('未在LeanCloud中找到对应商品，条码:', productToDelete.barcode);
-                        return null;
-                    }
-                }).then(() => {
-                    console.log('成功从LeanCloud删除商品数据:', productToDelete.barcode);
-                }).catch(error => {
-                    console.error('从LeanCloud删除商品数据失败:', error);
-                    let errorMsg = '从LeanCloud删除商品数据失败: ' + (error.message || '未知错误');
-                    let errorDetails = '';
-                    
-                    if (error.code === 401) {
-                        errorDetails = '\n\n错误原因：身份验证失败，请检查App ID和App Key是否正确。';
-                    } else if (error.code === 403) {
-                        errorDetails = '\n\n错误原因：权限不足，请检查LeanCloud应用的安全设置。';
-                    } else if (error.code === 429) {
-                        errorDetails = '\n\n错误原因：请求频率过高，请稍后重试。';
-                    } else if (error.code === 100) {
-                        errorDetails = '\n\n错误原因：网络连接失败，请检查您的网络连接。';
-                    }
-                    
-                    errorMsg += errorDetails;
-                    console.error(errorMsg);
-                });
-            } catch (error) {
-                console.error('LeanCloud删除操作初始化失败:', error);
-            }
-        }
-    }
-}
+/* ===================== 6.1 到期提醒 ===================== */
 
-// 添加映射
-function addMapping() {
-    const barcode = document.getElementById('newBarcode').value;
-    const productName = document.getElementById('newProductName').value;
-    const addMappingBtn = document.getElementById('addMappingBtn');
-    const isEditing = addMappingBtn.dataset.editingId;
-    
-    if (!barcode || !productName) {
-        alert('请填写完整的条码和商品名称！');
-        return;
-    }
-    
-    if (isEditing) {
-        // 编辑模式: 更新现有映射
-        // 不再使用parseInt，保持id的原始类型（可能是字符串或数字）
-        const mappingId = isEditing;
-        const mappingIndex = productMappings.findIndex(m => m.id == mappingId); // 使用==进行宽松比较
-        if (mappingIndex !== -1) {
-            const oldBarcode = productMappings[mappingIndex].barcode;
-            productMappings[mappingIndex] = {
-                ...productMappings[mappingIndex],
-                barcode: barcode,
-                productName: productName
-            };
-            // 如果条码发生变化，需要更新商品列表中所有使用旧条码的商品名称
-            if (oldBarcode !== barcode) {
-                syncProductNames(oldBarcode, productName);
-            }
-            // 同步更新使用新条码的商品名称
-            syncProductNames(barcode, productName);
-            
-            saveMappings();
-            updateMappingList();
-            updateProductList();
-            
-            // 清空输入
-            document.getElementById('newBarcode').value = '';
-            document.getElementById('newProductName').value = '';
-            
-            // 重置编辑模式
-            delete addMappingBtn.dataset.editingId;
-            addMappingBtn.textContent = '添加映射';
-            
-            // 取消自动同步，仅通过手动点击按钮触发
-            
-            alert('映射更新成功！');
-        }
-    } else {
-        // 添加模式: 创建新映射或更新现有映射
-        const existingIndex = productMappings.findIndex(m => m.barcode === barcode);
-        
-        if (existingIndex >= 0) {
-            // 更新现有映射
-            productMappings[existingIndex].productName = productName;
-            // 同步更新商品列表中的商品名称
-            syncProductNames(barcode, productName);
-        } else {
-            // 添加新映射
-            productMappings.push({
-                id: Date.now(),
-                barcode: barcode,
-                productName: productName
-            });
-        }
-        
-        // 保存映射
-        saveMappings();
-        
-        // 更新映射列表
-        updateMappingList();
-        
-        // 清空输入
-        document.getElementById('newBarcode').value = '';
-        document.getElementById('newProductName').value = '';
-        
-        // 取消自动同步，仅通过手动点击按钮触发
-        
-        alert('映射保存成功！');
-    }
-}
+const REMIND_ALERT_KEY = 'lastExpiryAlertDate';   // 已过期的弹窗每天最多一次
+const REMIND_HIDE_KEY = 'reminderHiddenDate';     // 点过「知道了」当天不再显示横幅
 
-// 同步商品名称
-function syncProductNames(barcode, newName) {
-    products.forEach(product => {
-        if (product.barcode === barcode) {
-            product.productName = newName;
+// 统计当前有多少商品需要提醒
+function getReminderSummary() {
+    const summary = { expired: 0, danger: 0, expiredList: [], dangerList: [] };
+
+    products.forEach(function(product) {
+        const status = getExpiryStatus(product.validity);
+        if (status === 'expired') {
+            summary.expired++;
+            summary.expiredList.push(product);
+        } else if (status === 'danger') {
+            summary.danger++;
+            summary.dangerList.push(product);
         }
     });
-    saveProducts();
-    updateProductList();
+
+    return summary;
+}
+
+// 把商品列表拼成「名称（有效期）」形式，最多列 5 条
+function reminderNames(list, total) {
+    const names = list.slice(0, 5).map(function(product) {
+        return (product.productName || product.barcode || '未命名') +
+               '（' + (product.validity || '无有效期') + '）';
+    }).join('、');
+    return names + (total > 5 ? ' 等' : '');
+}
+
+// 渲染顶部提醒条；没有临期/过期商品时自动隐藏
+function updateReminder() {
+    const banner = document.getElementById('reminderBanner');
+    if (!banner) return;
+
+    const summary = getReminderSummary();
+    const hasUrgent = summary.expired > 0 || summary.danger > 0;
+
+    // 点过「知道了」当天不再打扰
+    if (!hasUrgent || localStorage.getItem(REMIND_HIDE_KEY) === todayLocal()) {
+        banner.style.display = 'none';
+        banner.innerHTML = '';
+        return;
+    }
+
+    let html = '<div class="reminder-title">保质期提醒</div><div class="reminder-body">';
+
+    if (summary.expired > 0) {
+        html += '<span class="reminder-item reminder-item-expired">已过期 ' + summary.expired + ' 项：' +
+                escapeHtml(reminderNames(summary.expiredList, summary.expired)) + '</span>';
+    }
+    if (summary.danger > 0) {
+        html += '<span class="reminder-item reminder-item-danger">30 天内到期 ' + summary.danger + ' 项：' +
+                escapeHtml(reminderNames(summary.dangerList, summary.danger)) + '</span>';
+    }
+
+    html += '</div><div class="reminder-actions">' +
+            '<button type="button" class="btn btn-warning" id="reminderFilterBtn">只看这些</button>' +
+            '<button type="button" class="btn btn-secondary" id="reminderCloseBtn">知道了</button>' +
+            '</div>';
+
+    banner.className = 'reminder-banner' + (summary.expired > 0 ? ' reminder-banner-expired' : '');
+    banner.innerHTML = html;
+    banner.style.display = 'block';
+
+    // 「只看这些」：切到筛选模式，并同步底部主按钮的状态
+    const filterBtn = document.getElementById('reminderFilterBtn');
+    if (filterBtn) {
+        filterBtn.addEventListener('click', function() {
+            currentDisplayMode = 'filter';
+            const mainFilterBtn = document.getElementById('filterBtn');
+            if (mainFilterBtn) {
+                mainFilterBtn.textContent = '显示所有商品';
+                mainFilterBtn.classList.remove('btn-warning');
+                mainFilterBtn.classList.add('btn-success');
+            }
+            updateProductList();
+            const table = document.getElementById('productTable');
+            if (table) table.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    }
+
+    const closeBtn = document.getElementById('reminderCloseBtn');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', function() {
+            localStorage.setItem(REMIND_HIDE_KEY, todayLocal());
+            banner.style.display = 'none';
+        });
+    }
+}
+
+// 打开页面时，如果已经有商品过期，弹一次醒目提示（每天最多一次，免得天天被烦）
+function alertExpiredOnce() {
+    const summary = getReminderSummary();
+    if (summary.expired === 0) return;
+    if (localStorage.getItem(REMIND_ALERT_KEY) === todayLocal()) return;
+
+    localStorage.setItem(REMIND_ALERT_KEY, todayLocal());
+
+    const names = summary.expiredList.slice(0, 5).map(function(product) {
+        return '· ' + (product.productName || product.barcode || '未命名') +
+               '（有效期 ' + (product.validity || '未填') + '）';
+    }).join('\n');
+
+    alert('有 ' + summary.expired + ' 项商品已过期，请尽快处理：\n\n' + names +
+          (summary.expired > 5 ? '\n… 共 ' + summary.expired + ' 项' : ''));
 }
 
 // 更新映射列表
 function updateMappingList() {
     const tbody = document.querySelector('#mappingTable tbody');
     tbody.innerHTML = '';
-    
-    // 获取要显示的映射列表
-    let displayMappings = [...productMappings];
-    
+
+    let displayMappings = productMappings.slice();
+
     // 应用搜索过滤
     if (mappingSearchQuery) {
         const query = mappingSearchQuery.toLowerCase();
-        displayMappings = displayMappings.filter(m => 
-            m.productName.toLowerCase().includes(query) || m.barcode.includes(query)
-        );
+        displayMappings = displayMappings.filter(function(m) {
+            return (m.productName || '').toLowerCase().includes(query) ||
+                   (m.barcode || '').includes(query);
+        });
     }
-    
-    displayMappings.forEach((mapping, index) => {
+
+    displayMappings.forEach(function(mapping, index) {
         const row = document.createElement('tr');
-        
+
         row.innerHTML = `
             <td>${index + 1}</td>
             <td>${mapping.barcode}</td>
@@ -620,190 +1057,423 @@ function updateMappingList() {
                 <button class="btn btn-danger" onclick="deleteMapping('${mapping.id}')">删除</button>
             </td>
         `;
-        
+
         tbody.appendChild(row);
     });
 }
 
-// 编辑映射（全局函数，以便HTML onclick事件调用）
-window.editMapping = function(id) {
-    console.log('editMapping函数被调用，id:', id, '类型:', typeof id);
-    console.log('当前映射列表:', productMappings.map(m => ({ id: m.id, type: typeof m.id })));
-    
-    // 尝试使用不同的比较方式查找映射
-    let mapping = productMappings.find(m => m.id === id);
-    console.log('使用===查找结果:', mapping);
-    
-    if (!mapping) {
-        mapping = productMappings.find(m => m.id == id);
-        console.log('使用==查找结果:', mapping);
-    }
-    
-    if (!mapping) {
-        mapping = productMappings.find(m => String(m.id) === String(id));
-        console.log('使用字符串转换查找结果:', mapping);
-    }
-    if (!mapping) {
-        console.log('未找到映射，id:', id);
+/* ===================== 7. 编辑 / 删除 ===================== */
+// 编辑商品（全局函数，以便HTML onclick事件调用）
+window.editProduct = function(id) {
+    // 优先按 uid 找，兼容老记录的数字 id
+    let product = products.find(function(p) { return p.uid && String(p.uid) === String(id); });
+    if (!product) product = products.find(function(p) { return String(p.id) === String(id); });
+
+    if (!product) {
+        alert('未找到指定商品');
         return;
     }
-    
+
+    try {
+        document.getElementById('barcode').value = product.barcode;
+        document.getElementById('productName').value = product.productName;
+        document.getElementById('productionDate').value = product.productionDate;
+        document.getElementById('shelfLife').value = product.shelfLife;
+
+        const unitInput = document.getElementById('shelfLifeUnit');
+        if (unitInput) unitInput.value = product.shelfLifeUnit || '月';
+
+        document.getElementById('validity').value = product.validity;
+
+        // 设置编辑模式
+        document.getElementById('productForm').dataset.editingId = id;
+        document.querySelector('#productForm button[type="submit"]').textContent = '更新商品';
+    } catch (error) {
+        console.error('编辑功能执行失败:', error);
+    }
+};
+
+// 删除商品（全局函数，以便HTML onclick事件调用）
+window.deleteProduct = function(id) {
+    if (!confirm('确定要删除这个商品吗？')) return;
+
+    // 按 uid 定位（老记录兜底用 id），只删这一条，同条码的其他批次不受影响
+    function isTarget(p) {
+        return String(p.uid) === String(id) || String(p.id) === String(id);
+    }
+
+    const productToDelete = products.find(isTarget);
+
+    products = products.filter(function(p) { return !isTarget(p); });
+
+    saveProducts();
+    updateProductList();
+    updateChart();
+    updateReminder();
+
+    // 同步删除云端数据：只删这一条，不再把同条码的其他批次一起删掉
+    if (productToDelete && productToDelete.barcode) {
+        const targetUid = productToDelete.uid;
+
+        if (IS_GITHUB_PAGES) {
+            // GitHub 存储：重新拉取 → 过滤掉该条 → 写回
+            if (ghToken) {
+                ghLoad()
+                    .then(function(cloud) {
+                        const remainProducts = cloud.products.filter(function(p) {
+                            // 有 uid 就按 uid 比；云端老记录没 uid 时退回「条码 + 生产日期」比
+                            if (targetUid && p.uid) return String(p.uid) !== String(targetUid);
+                            return productFingerprint(p) !== productFingerprint(productToDelete);
+                        });
+                        const remainMappings = cloud.mappings.filter(function(m) {
+                            return m.barcode !== productToDelete.barcode;
+                        });
+                        return ghSave(remainProducts, remainMappings, '删除商品：' + productToDelete.barcode);
+                    })
+                    .then(function() {
+                        console.log('GitHub 数据已同步删除:', productToDelete.barcode);
+                    })
+                    .catch(function(error) {
+                        console.error('GitHub 删除失败:', error);
+                        showToast('云端删除失败：' + (error.message || '未知错误'), '#ff9800');
+                    });
+            }
+        } else if (cloudReady) {
+            cbDb.collection(PRODUCT_COLLECTION)
+                .where(targetUid ? { uid: targetUid } : { barcode: productToDelete.barcode })
+                .remove()
+                .then(function() {
+                    console.log('云端商品已删除:', productToDelete.barcode);
+                })
+                .catch(function(error) {
+                    console.error('云端删除失败:', error);
+                    showToast('云端删除失败：' + (error.message || '未知错误'), '#ff9800');
+                });
+        }
+    }
+};
+
+// 添加映射
+function addMapping() {
+    const barcode = document.getElementById('newBarcode').value;
+    const productName = document.getElementById('newProductName').value;
+    const addMappingBtn = document.getElementById('addMappingBtn');
+    const isEditing = addMappingBtn.dataset.editingId;
+
+    if (!barcode || !productName) {
+        alert('请填写完整的条码和商品名称！');
+        return;
+    }
+
+    if (isEditing) {
+        // 编辑模式：更新现有映射
+        const mappingId = isEditing;
+        const mappingIndex = productMappings.findIndex(function(m) { return m.id == mappingId; });
+
+        if (mappingIndex !== -1) {
+            const oldBarcode = productMappings[mappingIndex].barcode;
+            productMappings[mappingIndex] = Object.assign({}, productMappings[mappingIndex], {
+                barcode: barcode,
+                productName: productName
+            });
+
+            // 如果条码发生变化，需要更新商品列表中所有使用旧条码的商品名称
+            if (oldBarcode !== barcode) {
+                syncProductNames(oldBarcode, productName);
+            }
+            syncProductNames(barcode, productName);
+
+            saveMappings();
+            updateMappingList();
+            updateProductList();
+
+            document.getElementById('newBarcode').value = '';
+            document.getElementById('newProductName').value = '';
+
+            delete addMappingBtn.dataset.editingId;
+            addMappingBtn.textContent = '添加映射';
+
+            alert('映射更新成功！');
+        }
+    } else {
+        // 添加模式：创建新映射或更新现有映射
+        const existingIndex = productMappings.findIndex(function(m) { return m.barcode === barcode; });
+
+        if (existingIndex >= 0) {
+            // 更新现有映射
+            productMappings[existingIndex].productName = productName;
+            syncProductNames(barcode, productName);
+        } else {
+            // 添加新映射
+            productMappings.push({
+                id: Date.now(),
+                barcode: barcode,
+                productName: productName
+            });
+        }
+
+        saveMappings();
+        updateMappingList();
+
+        document.getElementById('newBarcode').value = '';
+        document.getElementById('newProductName').value = '';
+
+        alert('映射保存成功！');
+    }
+}
+
+// 同步商品名称
+function syncProductNames(barcode, newName) {
+    products.forEach(function(product) {
+        if (product.barcode === barcode) {
+            product.productName = newName;
+        }
+    });
+    saveProducts();
+    updateProductList();
+}
+
+// 编辑映射（全局函数，以便HTML onclick事件调用）
+window.editMapping = function(id) {
+    let mapping = productMappings.find(function(m) { return m.id === id; });
+    if (!mapping) mapping = productMappings.find(function(m) { return m.id == id; });
+    if (!mapping) mapping = productMappings.find(function(m) { return String(m.id) === String(id); });
+
+    if (!mapping) {
+        alert('未找到指定映射');
+        return;
+    }
+
     try {
         document.getElementById('newBarcode').value = mapping.barcode;
         document.getElementById('newProductName').value = mapping.productName;
-        
-        // 设置编辑模式
+
         document.getElementById('addMappingBtn').dataset.editingId = id;
         document.getElementById('addMappingBtn').textContent = '更新映射';
-        
-        console.log('映射编辑功能执行成功');
     } catch (error) {
         console.error('映射编辑功能执行失败:', error);
     }
-}
+};
 
 // 删除映射（全局函数，以便HTML onclick事件调用）
 window.deleteMapping = function(id) {
-    if (confirm('确定要删除这个映射吗？')) {
-        // 使用==进行宽松比较，兼容字符串和数字类型的ID
-        productMappings = productMappings.filter(m => m.id != id);
-        saveMappings();
-        updateMappingList();
-        
-        // 取消自动同步，仅通过手动点击按钮触发
-    }
+    if (!confirm('确定要删除这个映射吗？')) return;
+
+    productMappings = productMappings.filter(function(m) { return m.id != id; });
+    saveMappings();
+    updateMappingList();
+};
+
+/* ===================== 8. CSV 导入导出 ===================== */
+// CSV 单元格转义：内部引号加倍，否则商品名里带逗号会把列冲错
+function csvCell(value) {
+    const text = value === undefined || value === null ? '' : String(value);
+    return '"' + text.replace(/"/g, '""') + '"';
 }
 
-// 导出CSV
+// 导出CSV（商品 + 映射，导出文件本身就是一份完整备份）
 function exportToCSV() {
-    if (products.length === 0) {
+    if (products.length === 0 && productMappings.length === 0) {
         alert('没有数据可以导出！');
         return;
     }
-    
-    // 使用用户要求的表头顺序
-    const headers = ['类型', '商品条码', '商品名称', '扫描日期', '有效期', '生产日期', '保质期(月)', '状态'];
-    const rows = products.map(product => [
-        product.type,
-        product.barcode,
-        product.productName,
-        product.scanDate,
-        product.validity,
-        product.productionDate || '',
-        product.shelfLife || '',
-        getStatusText(getExpiryStatus(product.validity))
-    ]);
-    
+
+    const headers = ['类型', '商品条码', '商品名称', '扫描日期', '有效期', '生产日期', '保质期', '状态'];
+    const rows = [];
+
+    products.forEach(function(product) {
+        const shelfLife = formatShelfLife(product);
+        rows.push([
+            product.type || '商品',
+            product.barcode,
+            product.productName,
+            product.scanDate,
+            product.validity,
+            product.productionDate || '',
+            shelfLife === '-' ? '' : shelfLife,
+            getStatusText(getExpiryStatus(product.validity))
+        ]);
+    });
+
+    // 映射也一起导出，否则换台设备映射就全丢了
+    productMappings.forEach(function(mapping) {
+        rows.push(['映射', mapping.barcode, mapping.productName, '', '', '', '', '']);
+    });
+
     const csvContent = [
         headers.join(','),
-        ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+        ...rows.map(function(row) {
+            return row.map(csvCell).join(',');
+        })
     ].join('\n');
-    
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+
+    // 前面加 UTF-8 BOM（0xFEFF），否则 Excel 打开中文会乱码
+    const blob = new Blob([String.fromCharCode(65279) + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
-    
+
     link.setAttribute('href', url);
-    link.setAttribute('download', `商品到期提醒_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', '商品到期提醒_' + todayLocal() + '.csv');
     link.style.visibility = 'hidden';
-    
+
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+}
+
+// 解析CSV文本：正确处理引号包裹、引号内的逗号和换行
+function parseCsvText(text) {
+    const QUOTE = 34;   // "
+    const COMMA = 44;   // ,
+    const LF = 10;      // 换行
+    const CR = 13;      // 回车
+
+    const rows = [];
+    let row = [];
+    let field = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+
+        if (inQuotes) {
+            if (code === QUOTE) {
+                if (text.charCodeAt(i + 1) === QUOTE) { field += '"'; i++; }
+                else inQuotes = false;
+            } else {
+                field += text[i];
+            }
+        } else if (code === QUOTE) {
+            inQuotes = true;
+        } else if (code === COMMA) {
+            row.push(field); field = '';
+        } else if (code === LF) {
+            row.push(field); rows.push(row); row = []; field = '';
+        } else if (code !== CR) {
+            field += text[i];
+        }
+    }
+
+    if (field !== '' || row.length > 0) {
+        row.push(field);
+        rows.push(row);
+    }
+
+    return rows.filter(function(r) {
+        return r.some(function(c) { return String(c).trim() !== ''; });
+    });
+}
+
+// 去掉文件开头的 BOM，否则第一列“类型”识别不出来
+function stripBom(text) {
+    return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
+}
+
+// 把“7天”“12个月”“3年”“12”这样的保质期文本拆成 数量 + 单位
+function parseShelfLifeText(text) {
+    const raw = String(text || '').trim();
+    const m = /^(\d+(?:\.\d+)?)\s*(天|日|周|个月|月|年)?/.exec(raw);
+    if (!m) return { shelfLife: '', shelfLifeUnit: '月' };
+
+    let value = Number(m[1]);
+    let unit = m[2] || '月';
+    if (unit === '日') unit = '天';
+    if (unit === '周') { unit = '天'; value = value * 7; }
+    if (unit === '个月') unit = '月';
+
+    return { shelfLife: String(parseInt(value, 10)), shelfLifeUnit: unit };
 }
 
 // 导入CSV
 function importFromCSV(e) {
     const file = e.target.files[0];
     if (!file) return;
-    
+
     const reader = new FileReader();
     reader.onload = function(event) {
-        const csvContent = event.target.result;
-        const rows = csvContent.split('\n').filter(row => row.trim());
-        
+        const csvContent = stripBom(String(event.target.result || ''));
+        const rows = parseCsvText(csvContent);
+
         if (rows.length < 2) {
             alert('CSV文件格式不正确！');
             return;
         }
-        
+
         let productCount = 0;
         let mappingCount = 0;
-        
-        // 跳过表头，按照用户要求的顺序解析: 类型、商品条码、商品名称、扫描日期、有效期、生产日期、保质期(月)
+
+        // 跳过表头，顺序：类型、商品条码、商品名称、扫描日期、有效期、生产日期、保质期、状态
         for (let i = 1; i < rows.length; i++) {
-            const row = rows[i].split(',').map(cell => cell.replace(/"/g, ''));
-            if (row.length >= 3) {
-                const type = row[0].trim();
-                const barcode = row[1].trim();
-                const productName = row[2].trim();
-                
-                if (type === '商品' && row.length >= 7) {
-                    // 导入商品数据
-                    const product = {
-                        id: Date.now() + i,
-                        type: type,
-                        barcode: barcode,
-                        productName: productName,
-                        scanDate: row[3] || '',
-                        validity: row[4] || '',
-                        productionDate: row[5] || '',
-                        shelfLife: row[6] || '',
-                        createdAt: new Date().toISOString()
-                    };
-                    products.push(product);
-                    productCount++;
-                } else if (type === '映射') {
-                    // 导入映射数据
-                    const mapping = {
-                        id: Date.now() + i + 1000, // 确保ID与商品不冲突
-                        barcode: barcode,
-                        productName: productName
-                    };
-                    // 检查是否已存在相同条码的映射
-                    const existingIndex = productMappings.findIndex(m => m.barcode === barcode);
-                    if (existingIndex >= 0) {
-                        productMappings[existingIndex] = mapping;
-                    } else {
-                        productMappings.push(mapping);
-                    }
-                    mappingCount++;
+            const row = rows[i];
+            const type = (row[0] || '').trim();
+            const barcode = (row[1] || '').trim();
+            const productName = (row[2] || '').trim();
+
+            if (!barcode) continue;
+
+            if (type === '商品') {
+                const shelf = parseShelfLifeText(row[6]);
+                products.push({
+                    uid: makeUid(),      // 导入的记录也要有 uid，否则同步时无法与云端一一对应
+                    id: Date.now() + i,
+                    type: '商品',
+                    barcode: barcode,
+                    productName: productName,
+                    scanDate: (row[3] || '').trim(),
+                    validity: (row[4] || '').trim(),
+                    productionDate: (row[5] || '').trim(),
+                    shelfLife: shelf.shelfLife,
+                    shelfLifeUnit: shelf.shelfLifeUnit,
+                    createdAt: new Date().toISOString()
+                });
+                productCount++;
+            } else if (type === '映射') {
+                const mapping = {
+                    id: Date.now() + i + 1000,   // 确保ID与商品不冲突
+                    barcode: barcode,
+                    productName: productName
+                };
+                const existingIndex = productMappings.findIndex(function(m) { return m.barcode === barcode; });
+                if (existingIndex >= 0) {
+                    productMappings[existingIndex] = mapping;
+                } else {
+                    productMappings.push(mapping);
                 }
+                mappingCount++;
             }
         }
-        
+
         saveProducts();
         saveMappings();
         updateProductList();
         updateMappingList();
         updateChart();
-        
-        alert(`成功导入 ${productCount} 条商品记录和 ${mappingCount} 条映射记录！`);
+
+        alert('成功导入 ' + productCount + ' 条商品记录和 ' + mappingCount + ' 条映射记录！');
     };
-    
+
     reader.readAsText(file, 'UTF-8');
-    
+
     // 重置文件输入
     e.target.value = '';
 }
 
 // 清空所有数据
 function clearAllData() {
-    if (confirm('确定要清空所有数据吗？此操作不可恢复！')) {
-        products = [];
-        productMappings = [];
-        saveProducts();
-        saveMappings();
-        updateProductList();
-        updateMappingList();
-        updateChart();
-        alert('所有数据已清空！');
-    }
+    if (!confirm('确定要清空所有数据吗？此操作不可恢复！')) return;
+
+    products = [];
+    productMappings = [];
+    saveProducts();
+    saveMappings();
+    updateProductList();
+    updateMappingList();
+    updateChart();
+    alert('所有数据已清空！');
 }
 
-// 图表实例
-let chart;
-
+/* ===================== 9. 图表 ===================== */
 // 初始化图表
 function initializeChart() {
     const ctx = document.getElementById('expiryChart').getContext('2d');
@@ -834,15 +1504,11 @@ function initializeChart() {
             scales: {
                 y: {
                     beginAtZero: true,
-                    ticks: {
-                        precision: 0
-                    }
+                    ticks: { precision: 0 }
                 }
             },
             plugins: {
-                legend: {
-                    display: false
-                },
+                legend: { display: false },
                 tooltip: {
                     callbacks: {
                         label: function(context) {
@@ -857,18 +1523,14 @@ function initializeChart() {
 
 // 获取到期数量统计
 function getExpiryCounts() {
-    const counts = {
-        normal: 0,
-        warning: 0,
-        danger: 0,
-        expired: 0
-    };
-    
-    products.forEach(product => {
+    const counts = { normal: 0, warning: 0, danger: 0, expired: 0, unknown: 0 };
+
+    products.forEach(function(product) {
         const status = getExpiryStatus(product.validity);
+        if (counts[status] === undefined) return;   // 未填有效期的记录不进图表
         counts[status]++;
     });
-    
+
     return [counts.normal, counts.warning, counts.danger, counts.expired];
 }
 
@@ -882,815 +1544,413 @@ function updateChart() {
 
 // 加载数据
 function loadData() {
-    // 从本地存储加载
     products = JSON.parse(localStorage.getItem('products')) || [];
     productMappings = JSON.parse(localStorage.getItem('productMappings')) || [];
-}
 
-// 同步数据到 LeanCloud
-function syncData() {
-    // 检查是否使用默认配置
-    const isDefaultConfig = APP_ID === 'your_app_id' || APP_KEY === 'your_app_key';
-    
-    console.log('syncData函数被调用，配置检查:', { APP_ID, APP_KEY, isDefaultConfig });
-    
-    if (isDefaultConfig) {
-        // 使用模拟同步功能
-        console.log('使用模拟同步功能');
-        simulateSyncData();
-    } else {
-        // 使用实际的 LeanCloud 同步功能
-        console.log('使用真实LeanCloud同步功能');
-        realSyncData();
+    // 老数据没有 uid，这里补上并立刻落盘（云端的老记录会在同步时认领）
+    if (products.some(function(p) { return !p.uid; })) {
+        products = ensureProductUids(products, null);
+        saveProducts();
     }
 }
 
-// 模拟数据同步功能
-function simulateSyncData() {
-    console.log('开始模拟数据同步...');
-    
-    try {
-        // 显示同步进度
-        const syncNotification = document.createElement('div');
-        syncNotification.style.position = 'fixed';
-        syncNotification.style.top = '20px';
-        syncNotification.style.right = '20px';
-        syncNotification.style.backgroundColor = '#4CAF50';
-        syncNotification.style.color = 'white';
-        syncNotification.style.padding = '15px';
-        syncNotification.style.borderRadius = '8px';
-        syncNotification.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
-        syncNotification.style.zIndex = '1000';
-        syncNotification.style.fontSize = '14px';
-        syncNotification.textContent = '正在同步数据...';
-        document.body.appendChild(syncNotification);
-        
-        // 模拟网络延迟
-        setTimeout(() => {
-            // 模拟同步商品数据
-            console.log('模拟同步商品数据:', products.length, '条');
-            
-            // 模拟同步映射数据
-            console.log('模拟同步映射数据:', productMappings.length, '条');
-            
-            // 更新通知
-            syncNotification.textContent = '数据同步完成！';
-            syncNotification.style.backgroundColor = '#45a049';
-            
-            // 3秒后移除通知
-            setTimeout(() => {
-                document.body.removeChild(syncNotification);
-            }, 3000);
-            
-            // 显示同步结果
-            alert(`模拟数据同步完成！\n商品数据: ${products.length}条\n映射数据: ${productMappings.length}条\n\n提示: 要使用真实的LeanCloud同步功能，请在script.js文件中配置你的APP_ID、APP_KEY和serverURL。`);
-            
-        }, 1500);
-        
-    } catch (error) {
-        console.error('模拟同步失败:', error);
-        alert('模拟数据同步失败: ' + error.message);
-    }
+/* ===================== 9.5 记录唯一标识 ===================== */
+
+// 商品用 uid 做唯一标识。
+// 以前拿「条码」当唯一键，同一箱牛奶这周和下月各买一次（条码相同、生产日期不同），
+// 同步时后录入的会把前一条覆盖掉，云端和本地一起少一条数据。
+function makeUid() {
+    return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
-// 实际的 LeanCloud 同步功能
-function realSyncData() {
-    if (!APP_ID || !APP_KEY) {
-        alert('请先配置 LeanCloud App ID 和 App Key！');
-        return;
-    }
-    
-    if (!leanCloudInitialized) {
-        alert('LeanCloud尚未成功初始化，请检查网络连接或配置信息！');
-        return;
-    }
-    
-    console.log('开始使用真实 LeanCloud 同步数据...');
-    console.log('配置信息:', { APP_ID, APP_KEY, serverURL: AV.serverURL });
-    
-    // 显示同步进度通知
-    const syncNotification = document.createElement('div');
-    syncNotification.style.position = 'fixed';
-    syncNotification.style.top = '20px';
-    syncNotification.style.right = '20px';
-    syncNotification.style.backgroundColor = '#4CAF50';
-    syncNotification.style.color = 'white';
-    syncNotification.style.padding = '15px';
-    syncNotification.style.borderRadius = '8px';
-    syncNotification.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
-    syncNotification.style.zIndex = '1000';
-    syncNotification.style.fontSize = '14px';
-    syncNotification.textContent = '正在同步数据到 LeanCloud...';
-    document.body.appendChild(syncNotification);
-    
-    let totalSyncCount = 0;
-    let successfulSyncCount = 0;
-    let failedSyncCount = 0;
-    
-    const totalItems = products.length + productMappings.length;
-    
-    if (totalItems === 0) {
-        syncNotification.textContent = '没有数据需要同步！';
-        setTimeout(() => {
-            document.body.removeChild(syncNotification);
-        }, 3000);
-        alert('没有数据需要同步！');
-        return;
-    }
-    
-    // 更新同步进度
-    function updateSyncProgress() {
-        syncNotification.textContent = `正在同步数据: ${totalSyncCount}/${totalItems} (成功: ${successfulSyncCount}, 失败: ${failedSyncCount})`;
-    }
-    
-    // 完成同步
-    function finishSync() {
-        syncNotification.textContent = `数据同步完成: 共 ${totalItems} 项，成功 ${successfulSyncCount} 项，失败 ${failedSyncCount} 项`;
-        
-        // 根据结果显示不同的颜色
-        if (failedSyncCount === 0) {
-            syncNotification.style.backgroundColor = '#45a049'; // 成功
-        } else {
-            syncNotification.style.backgroundColor = '#ff9800'; // 警告
-        }
-        
-        setTimeout(() => {
-            document.body.removeChild(syncNotification);
-        }, 5000);
-        
-        alert(`数据同步完成！\n共 ${totalItems} 项\n成功: ${successfulSyncCount} 项\n失败: ${failedSyncCount} 项`);
-    }
-    
-    // 并行处理函数
-    function processInParallel(items, processFn, maxConcurrency = 15) {
-        const results = [];
-        const running = [];
-        let index = 0;
-        
-        function runNext() {
-            if (index >= items.length) return Promise.resolve();
-            
-            const item = items[index++];
-            const promise = processFn(item).then(result => {
-                results.push(result);
-                running.splice(running.indexOf(promise), 1);
-                return runNext();
-            }).catch(error => {
-                running.splice(running.indexOf(promise), 1);
-                return runNext();
-            });
-            
-            running.push(promise);
-            return running.length >= maxConcurrency ? Promise.race(running) : runNext();
-        }
-        
-        return runNext().then(() => results);
-    }
-    
-    // 带重试的请求处理函数（优化版）
-    function requestWithRetry(item, processFn, maxRetries = 3, initialDelay = 500) {
-        let retries = 0;
-        
-        function attemptRequest() {
-            return processFn(item).catch(error => {
-                // 定义需要重试的错误类型
-                const retryableErrors = [
-                    429, // 请求频率过高
-                    100, // 网络错误
-                    408, // 请求超时
-                    500, // 服务器内部错误
-                    502, // 网关错误
-                    503, // 服务不可用
-                    504  // 网关超时
-                ];
-                
-                // 检查是否需要重试
-                if ((retryableErrors.includes(error.code) || 
-                     error.message?.includes('timeout') || 
-                     error.message?.includes('Timeout')) && 
-                    retries < maxRetries) {
-                    retries++;
-                    const retryDelay = initialDelay * Math.pow(2, retries - 1); // 指数退避
-                    
-                    // 根据错误类型和重试次数调整延迟
-                    let adjustedDelay = retryDelay;
-                    if (error.code === 429) {
-                        // 对频率限制错误增加额外延迟
-                        adjustedDelay += Math.random() * 1000; // 增加随机延迟避免同时重试
-                    }
-                    
-                    // 获取批量信息用于日志
-                    const itemInfo = Array.isArray(item) ? `${item.length}项数据` : item?.barcode || '数据';
-                    console.log(`${error.code || '网络'}错误，${adjustedDelay / 1000}秒后重试（第${retries}次重试）:`, itemInfo);
-                    
-                    return new Promise(resolve => {
-                        setTimeout(() => resolve(attemptRequest()), adjustedDelay);
-                    });
-                }
-                
-                // 对于非重试错误，更新失败计数
-                if (error.code !== 401 && error.code !== 403) { // 不计算权限错误
-                    failedSyncCount++;
-                    totalSyncCount++;
-                    updateSyncProgress();
-                }
-                
-                throw error;
-            });
-        }
-        
-        return attemptRequest();
-    }
-    
-    // 批量查询现有记录函数（支持分批查询）
-    async function getExistingRecords(type, items, fieldName = 'barcode') {
-        const AVClass = AV.Object.extend(type);
-        const QUERY_BATCH_SIZE = 100;
-        
-        // 提取所有要查询的值
-        const values = items.map(item => item[fieldName]);
-        if (values.length === 0) return new Map();
-        
-        // 创建映射表
-        const recordMap = new Map();
-        
-        try {
-            // 分批查询
-            for (let i = 0; i < values.length; i += QUERY_BATCH_SIZE) {
-                const batchValues = values.slice(i, i + QUERY_BATCH_SIZE);
-                const query = new AV.Query(AVClass);
-                
-                // 批量查询当前批次
-                query.containedIn(fieldName, batchValues);
-                const batchRecords = await query.find();
-                
-                // 添加到映射表
-                batchRecords.forEach(record => {
-                    const value = record.get(fieldName);
-                    recordMap.set(value, record);
-                });
-            }
-            
-            console.log(`分批查询${type}完成，共找到${recordMap.size}条记录`);
-            return recordMap;
-        } catch (error) {
-            console.error(`批量查询${type}失败:`, error);
-            // 如果批量查询失败，返回空映射，将使用逐个查询作为回退
-            return new Map();
-        }
-    }
-    
-    // 批量大小和并发配置（动态调整）
-    function getOptimalBatchSize(totalItems) {
-        if (totalItems < 100) return 50;
-        if (totalItems < 1000) return 100;
-        return 200; // 最大不超过200，避免LeanCloud API限制
-    }
-    
-    function getOptimalConcurrency(totalItems, batchSize) {
-        const totalBatches = Math.ceil(totalItems / batchSize);
-        if (totalItems < 100) return Math.min(3, totalBatches);
-        if (totalItems < 1000) return Math.min(8, totalBatches);
-        return Math.min(12, totalBatches); // 最大并发12，避免系统过载
-    }
-    
-    // 并行批量处理函数
-    async function processBatchesInParallel(items, processBatchFn, batchSize = null, maxConcurrency = null) {
-        // 动态计算批处理大小和并发数
-        const optimalBatchSize = batchSize || getOptimalBatchSize(items.length);
-        const optimalConcurrency = maxConcurrency || getOptimalConcurrency(items.length, optimalBatchSize);
-        
-        const batches = [];
-        // 创建批次
-        for (let i = 0; i < items.length; i += optimalBatchSize) {
-            batches.push(items.slice(i, i + optimalBatchSize));
-        }
-        
-        if (batches.length === 0) return;
-        
-        console.log(`开始并行处理${batches.length}个批次，每批${optimalBatchSize}条，最大并发${optimalConcurrency}`);
-        
-        const results = [];
-        const running = [];
-        let index = 0;
-        
-        function runNext() {
-            if (index >= batches.length) return Promise.resolve();
-            const batch = batches[index++];
-            const promise = processBatchFn(batch).then(result => {
-                results.push(result);
-                running.splice(running.indexOf(promise), 1);
-                return runNext();
-            }).catch(error => {
-                console.error(`处理批次${index - 1}失败:`, error);
-                running.splice(running.indexOf(promise), 1);
-                return runNext();
-            });
-            
-            running.push(promise);
-            return running.length >= maxConcurrency ? Promise.race(running) : runNext();
-        }
-        
-        await runNext();
-        return results;
-    }
-    
-    // 同步商品数据
-    async function syncProducts() {
-        if (products.length === 0) return;
-        
-        console.log('开始同步商品数据，共', products.length, '条');
-        
-        // 批量查询现有商品
-        const existingProductsMap = await getExistingRecords('Product', products);
-        console.log('批量查询到的现有商品数量:', existingProductsMap.size);
-        
-        // 处理单个批次的商品
-        async function processProductBatch(batchProducts) {
-            const batchAVObjects = [];
-            
-            // 准备当前批次的AV对象
-            batchProducts.forEach(product => {
-                const Product = AV.Object.extend('Product');
-                const productData = { ...product };
-                delete productData.id;
-                delete productData.createdAt;
-                delete productData.updatedAt;
-                
-                let avProduct;
-                
-                // 检查是否已存在相同条码的商品
-                const existingProduct = existingProductsMap.get(productData.barcode);
-                if (existingProduct) {
-                    // 如果存在，更新现有记录
-                    avProduct = existingProduct;
-                    console.log('更新现有商品:', productData.barcode);
-                } else {
-                    // 如果不存在，创建新记录
-                    avProduct = new Product();
-                    console.log('创建新商品:', productData.barcode);
-                }
-                
-                // 设置产品数据到AV对象
-                avProduct.set('barcode', productData.barcode);
-                avProduct.set('productName', productData.productName);
-                avProduct.set('type', productData.type);
-                avProduct.set('scanDate', productData.scanDate);
-                avProduct.set('productionDate', productData.productionDate);
-                avProduct.set('shelfLife', productData.shelfLife);
-                avProduct.set('validity', productData.validity);
-                
-                batchAVObjects.push(avProduct);
-            });
-            
-            // 使用批量操作保存当前批次
-            await requestWithRetry(batchAVObjects, async () => {
-                await AV.Object.saveAll(batchAVObjects);
-                
-                // 更新进度
-                successfulSyncCount += batchAVObjects.length;
-                totalSyncCount += batchAVObjects.length;
-                updateSyncProgress();
-            }, 3, 500);
-        }
-        
-        // 并行处理商品批次（自动调整批处理大小和并发数）
-        await processBatchesInParallel(products, processProductBatch);
-    }
-    
-    // 同步映射数据
-    async function syncMappings() {
-        if (productMappings.length === 0) return;
-        
-        console.log('开始同步映射数据，共', productMappings.length, '条');
-        
-        // 批量查询现有映射
-        const existingMappingsMap = await getExistingRecords('Mapping', productMappings);
-        console.log('批量查询到的现有映射数量:', existingMappingsMap.size);
-        
-        // 处理单个批次的映射
-        async function processMappingBatch(batchMappings) {
-            const batchAVObjects = [];
-            
-            // 准备当前批次的AV对象
-            batchMappings.forEach(mapping => {
-                const Mapping = AV.Object.extend('Mapping');
-                const mappingData = { ...mapping };
-                delete mappingData.id;
-                delete mappingData.createdAt;
-                delete mappingData.updatedAt;
-                
-                let avMapping;
-                
-                // 检查是否已存在相同条码的映射
-                const existingMapping = existingMappingsMap.get(mappingData.barcode);
-                if (existingMapping) {
-                    // 如果存在，更新现有记录
-                    avMapping = existingMapping;
-                    console.log('更新现有映射:', mappingData.barcode);
-                } else {
-                    // 如果不存在，创建新记录
-                    avMapping = new Mapping();
-                    console.log('创建新映射:', mappingData.barcode);
-                }
-                
-                avMapping.set('barcode', mappingData.barcode);
-                avMapping.set('productName', mappingData.productName);
-                
-                batchAVObjects.push(avMapping);
-            });
-            
-            // 使用批量操作保存当前批次
-            await requestWithRetry(batchAVObjects, async () => {
-                await AV.Object.saveAll(batchAVObjects);
-                
-                // 更新进度
-                successfulSyncCount += batchAVObjects.length;
-                totalSyncCount += batchAVObjects.length;
-                updateSyncProgress();
-            }, 3, 500);
-        }
-        
-        // 并行处理映射批次（自动调整批处理大小和并发数）
-        await processBatchesInParallel(productMappings, processMappingBatch);
-    }
-    
-    // 执行同步
-    try {
-        // 并行同步商品和映射数据
-        Promise.all([syncProducts(), syncMappings()]).then(() => {
-            // 同步完成
-            finishSync();
-        }).catch(error => {
-            console.error('数据同步过程中发生错误:', error);
-            syncNotification.textContent = '数据同步发生错误！';
-            syncNotification.style.backgroundColor = '#f44336'; // 错误
-            
-            setTimeout(() => {
-                document.body.removeChild(syncNotification);
-            }, 5000);
-            
-            let errorMsg = '数据同步失败: ' + (error.message || '未知错误');
-            let errorDetails = '';
-            
-            // 根据错误类型提供更具体的解决方案
-            if (error.code === 401) {
-                errorDetails = '\n\n错误原因：身份验证失败，请检查App ID和App Key是否正确。';
-            } else if (error.code === 403) {
-                errorDetails = '\n\n错误原因：权限不足，请检查LeanCloud应用的安全设置。';
-            } else if (error.code === 429) {
-                errorDetails = '\n\n错误原因：请求频率过高，请稍后重试或减少同步数据量。';
-            } else if (error.code === 100) {
-                errorDetails = '\n\n错误原因：网络连接失败，请检查您的网络连接。';
-            } else if (error.message.includes('Access denied by api domain white list')) {
-                const origin = error.message.match(/request origin header is '(.*?)'/);
-                if (origin && origin[1]) {
-                    errorDetails = `\n\n错误原因：API域名白名单限制\n\n解决方案：\n1. 登录 LeanCloud 控制台\n2. 进入应用设置 > 安全中心 > Web安全域名\n3. 在输入框中添加：${origin[1]}\n4. 点击保存后重新尝试`;
-                }
-            } else if (error.message.includes('timeout') || error.message.includes('Timeout')) {
-                errorDetails = '\n\n错误原因：请求超时，请检查网络连接或稍后重试。';
-            }
-            
-            errorMsg += errorDetails;
-            errorMsg += '\n\n建议：\n1. 检查网络连接是否正常\n2. 确认LeanCloud配置信息是否正确\n3. 检查LeanCloud控制台中的应用状态\n4. 尝试刷新页面后重新同步';
-            
-            alert(errorMsg);
-        });
-    } catch (error) {
-        console.error('数据同步初始化失败:', error);
-        syncNotification.textContent = '数据同步发生错误！';
-        syncNotification.style.backgroundColor = '#f44336'; // 错误
-        
-        setTimeout(() => {
-            document.body.removeChild(syncNotification);
-        }, 5000);
-        
-        let errorMsg = '数据同步失败: ' + (error.message || '未知错误');
-        errorMsg += '\n\n建议：\n1. 检查网络连接是否正常\n2. 确认LeanCloud配置信息是否正确\n3. 检查LeanCloud控制台中的应用状态\n4. 尝试刷新页面后重新同步';
-        
-        alert(errorMsg);
-    }
+// 老记录的指纹：条码 + 生产日期。用来判断「云端的这条」和「本地的这条」是不是同一样东西
+function productFingerprint(product) {
+    return String(product.barcode || '') + '\u0001' + String(product.productionDate || '');
 }
 
-// 从 LeanCloud 获取最新数据
-window.fetchLatestDataFromCloud = function() {
-    if (!leanCloudInitialized) {
-        alert('LeanCloud尚未成功初始化，请检查网络连接或配置信息！');
-        return;
-    }
-    
-    console.log('开始从LeanCloud获取最新数据...');
-    
-    // 显示获取数据进度通知
-    const fetchNotification = document.createElement('div');
-    fetchNotification.style.position = 'fixed';
-    fetchNotification.style.top = '20px';
-    fetchNotification.style.right = '20px';
-    fetchNotification.style.backgroundColor = '#2196F3';
-    fetchNotification.style.color = 'white';
-    fetchNotification.style.padding = '15px';
-    fetchNotification.style.borderRadius = '8px';
-    fetchNotification.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
-    fetchNotification.style.zIndex = '1000';
-    fetchNotification.style.fontSize = '14px';
-    fetchNotification.textContent = '正在从云端获取最新数据...';
-    document.body.appendChild(fetchNotification);
-    
-    // 分批获取数据的通用函数
-    function fetchDataInBatches(AVClass, queryLimit = 1000) {
-        return new Promise(async (resolve, reject) => {
-            try {
-                const query = new AV.Query(AVClass);
-                let allResults = [];
-                let skip = 0;
-                let hasMore = true;
-                
-                // 先获取总数
-                const total = await query.count();
-                console.log(`开始分批获取${AVClass.className}数据，共${total}条，每批${queryLimit}条`);
-                
-                // 分批获取数据
-                while (hasMore) {
-                    query.limit(queryLimit);
-                    query.skip(skip);
-                    
-                    const results = await query.find();
-                    allResults = allResults.concat(results);
-                    
-                    console.log(`已获取${allResults.length}/${total}条${AVClass.className}数据`);
-                    
-                    skip += queryLimit;
-                    hasMore = skip < total && results.length > 0;
-                }
-                
-                resolve(allResults);
-            } catch (error) {
-                console.error(`分批获取${AVClass.className}数据失败:`, error);
-                reject(error);
-            }
-        });
-    }
-    
-    // 获取商品数据
-    function fetchProducts() {
-        return new Promise(async (resolve, reject) => {
-            try {
-                const Product = AV.Object.extend('Product');
-                const results = await fetchDataInBatches(Product);
-                
-                console.log('成功获取到商品数据:', results.length, '条');
-                const cloudProducts = results.map(item => {
-                    return {
-                        id: item.id, // 使用LeanCloud的objectId作为唯一标识
-                        barcode: item.get('barcode'),
-                        productName: item.get('productName'),
-                        type: item.get('type'),
-                        scanDate: item.get('scanDate'),
-                        productionDate: item.get('productionDate'),
-                        shelfLife: item.get('shelfLife'),
-                        validity: item.get('validity'),
-                        createdAt: item.createdAt.toISOString(),
-                        updatedAt: item.updatedAt.toISOString()
-                    };
-                });
-                resolve(cloudProducts);
-            } catch (error) {
-                console.error('获取商品数据失败:', error);
-                reject(error);
-            }
-        });
-    }
-    
-    // 获取映射数据
-    function fetchMappings() {
-        return new Promise(async (resolve, reject) => {
-            try {
-                const Mapping = AV.Object.extend('Mapping');
-                const results = await fetchDataInBatches(Mapping);
-                
-                console.log('成功获取到映射数据:', results.length, '条');
-                const cloudMappings = results.map(item => {
-                    return {
-                        id: item.id, // 使用LeanCloud的objectId作为唯一标识
-                        barcode: item.get('barcode'),
-                        productName: item.get('productName'),
-                        createdAt: item.createdAt.toISOString(),
-                        updatedAt: item.updatedAt.toISOString()
-                    };
-                });
-                resolve(cloudMappings);
-            } catch (error) {
-                console.error('获取映射数据失败:', error);
-                reject(error);
-            }
-        });
-    }
-    
-    // 合并数据
-    function mergeData(cloudProducts, cloudMappings) {
-        console.log('开始合并数据...');
-        
-        // 合并商品数据（使用云端数据覆盖本地数据）
-        if (cloudProducts.length > 0) {
-            products = cloudProducts;
-            saveProducts();
-            updateProductList();
-            updateChart();
+// 给缺 uid 的记录补 uid；uidIndex 能查到同款记录时优先沿用它的 uid，避免迁移时凭空多出一条
+function ensureProductUids(list, uidIndex) {
+    return (list || []).map(function(product) {
+        if (!product.uid) {
+            const fingerprint = productFingerprint(product);
+            product.uid = (uidIndex && uidIndex[fingerprint]) || makeUid();
         }
-        
-        // 合并映射数据（使用云端数据覆盖本地数据）
-        if (cloudMappings.length > 0) {
-            productMappings = cloudMappings;
-            saveMappings();
-            updateMappingList();
-        }
-        
-        console.log('数据合并完成:', { products: products.length, mappings: productMappings.length });
-        
-        fetchNotification.textContent = '数据获取完成！共获取 ' + (cloudProducts.length + cloudMappings.length) + ' 项数据';
-        fetchNotification.style.backgroundColor = '#45a049'; // 成功
-        
-        setTimeout(() => {
-            document.body.removeChild(fetchNotification);
-        }, 5000);
-        
-        alert(`成功从云端获取最新数据！\n商品: ${cloudProducts.length} 条\n映射: ${cloudMappings.length} 条`);
-    }
-    
-    // 执行数据获取（并行获取商品和映射数据）
-    Promise.all([fetchProducts(), fetchMappings()]).then(([cloudProducts, cloudMappings]) => {
-        mergeData(cloudProducts, cloudMappings);
-    }).catch(error => {
-        console.error('数据获取过程中发生错误:', error);
-        fetchNotification.textContent = '数据获取发生错误！';
-        fetchNotification.style.backgroundColor = '#f44336'; // 错误
-        
-        setTimeout(() => {
-            document.body.removeChild(fetchNotification);
-        }, 5000);
-        
-        let errorMsg = '数据获取失败: ' + (error.message || '未知错误');
-        let errorDetails = '';
-        
-        // 根据错误类型提供更具体的解决方案
-        if (error.code === 401) {
-            errorDetails = '\n\n错误原因：身份验证失败，请检查App ID和App Key是否正确。';
-        } else if (error.code === 403) {
-            errorDetails = '\n\n错误原因：权限不足，请检查LeanCloud应用的安全设置。';
-        } else if (error.code === 429) {
-            errorDetails = '\n\n错误原因：请求频率过高，请稍后重试或减少同步数据量。';
-        } else if (error.code === 100) {
-            errorDetails = '\n\n错误原因：网络连接失败，请检查您的网络连接。';
-        } else if (error.message.includes('Access denied by api domain white list')) {
-            const origin = error.message.match(/request origin header is '(.*?)'/);
-            if (origin && origin[1]) {
-                errorDetails = `\n\n解决方案：\n1. 登录 LeanCloud 控制台\n2. 进入应用设置 > 安全中心 > Web安全域名\n3. 在输入框中添加：${origin[1]}\n4. 点击保存后重新尝试`;
-            }
-        } else if (error.message.includes('timeout') || error.message.includes('Timeout')) {
-            errorDetails = '\n\n错误原因：请求超时，请检查网络连接或稍后重试。';
-        }
-        
-        errorMsg += errorDetails;
-        errorMsg += '\n\n建议：\n1. 检查网络连接是否正常\n2. 确认LeanCloud配置信息是否正确\n3. 检查LeanCloud控制台中的应用状态\n4. 尝试刷新页面后重新同步';
-        
-        alert(errorMsg);
+        return product;
     });
 }
 
-// 初始化实时数据监听
-function initializeLiveQuery() {
-    console.log('开始初始化实时数据监听...');
-    
-    // 检查是否使用默认配置
-    const isDefaultConfig = APP_ID === 'your_app_id' || APP_KEY === 'your_app_key';
-    if (isDefaultConfig) {
-        console.log('使用默认配置，跳过实时数据监听初始化');
-        return;
-    }
-    
-    try {
-        // 检查 LiveQuery 是否可用
-        if (!AV.LiveQuery || !AV.LiveQuery.subscribe) {
-            console.log('当前 LeanCloud SDK 不支持 LiveQuery 功能');
-            // 不再自动设置定期同步，只保留手动同步
+// 本地记录按指纹建索引：指纹 -> uid
+function buildUidIndex(list) {
+    const index = {};
+    (list || []).forEach(function(product) {
+        if (product.uid) index[productFingerprint(product)] = product.uid;
+    });
+    return index;
+}
+
+// 按 uid 合并两份商品列表；同一条记录冲突时本地优先（与原有行为一致）
+function mergeProductsByUid(cloudList, localList) {
+    // 必须先给本地记录补齐 uid，再按指纹建索引。
+    // 否则本地记录恰好都没 uid 时，云端的老记录匹配不到、会被当成新记录重复插入。
+    const localWithUid = ensureProductUids(localList, null);
+    const uidIndex = buildUidIndex(localWithUid);
+    const map = new Map();
+
+    ensureProductUids(cloudList, uidIndex).forEach(function(product) {
+        map.set(String(product.uid), product);
+    });
+    localWithUid.forEach(function(product) {
+        map.set(String(product.uid), product);
+    });
+
+    return Array.from(map.values());
+}
+
+// 映射按条码合并：一个条码本来就只该对应一个名称，这里特意不用 uid
+function mergeMappingsByBarcode(cloudList, localList) {
+    const map = new Map();
+    (cloudList || []).forEach(function(mapping) {
+        if (mapping && mapping.barcode) map.set(String(mapping.barcode), mapping);
+    });
+    (localList || []).forEach(function(mapping) {
+        if (mapping && mapping.barcode) map.set(String(mapping.barcode), mapping);
+    });
+    return Array.from(map.values());
+}
+
+/* ===================== 10. 云端同步 ===================== */
+// 同步本地数据到云端（按 uid 匹配：有则更新，无则新增）
+async function syncData() {
+    /* ---- GitHub 存储：本地与云端合并后写回 ---- */
+    if (IS_GITHUB_PAGES) {
+        if (!await ensureGhToken()) return;
+
+        if (products.length + productMappings.length === 0) {
+            alert('没有数据需要同步！');
             return;
         }
-        
-        // 初始化商品数据监听
-        const Product = AV.Object.extend('Product');
-        const productQuery = new AV.Query(Product);
-        
-        // 订阅商品数据变更
-        AV.LiveQuery.subscribe(productQuery).then(productSubscription => {
-            console.log('成功订阅商品数据变更');
-            
-            // 处理商品创建事件
-            productSubscription.on('create', function(product) {
-                console.log('收到商品创建事件:', product.get('barcode'));
-                showRealTimeNotification('新商品添加', `${product.get('productName')} (${product.get('barcode')}) 已添加`);
-            });
-            
-            // 处理商品更新事件
-            productSubscription.on('update', function(product) {
-                console.log('收到商品更新事件:', product.get('barcode'));
-                showRealTimeNotification('商品更新', `${product.get('productName')} (${product.get('barcode')}) 已更新`);
-            });
-            
-            // 处理商品删除事件
-            productSubscription.on('delete', function(product) {
-                console.log('收到商品删除事件:', product.get('barcode'));
-                showRealTimeNotification('商品删除', `${product.get('productName')} (${product.get('barcode')}) 已删除`);
-            });
-        }).catch(error => {
-            console.error('订阅商品数据变更失败:', error);
-            // 不再自动设置定期同步
+
+        showToast('正在同步数据到 GitHub ...', '#4CAF50', 60000);
+
+        try {
+            const cloud = await ghLoad();
+
+            // 商品按 uid 合并（同一条码的不同批次不再互相覆盖），映射仍按条码合并
+            const mergedProducts = mergeProductsByUid(cloud.products, products);
+            const mergedMappings = mergeMappingsByBarcode(cloud.mappings, productMappings);
+
+            await ghSave(mergedProducts, mergedMappings, '同步商品数据');
+
+            products = mergedProducts;
+            productMappings = mergedMappings;
+            saveProducts();
+            saveMappings();
+            updateProductList();
+            updateMappingList();
+            updateChart();
+
+            showToast('同步完成：商品 ' + mergedProducts.length + ' 条', '#45a049', 5000);
+            alert('数据同步完成！\n商品: ' + mergedProducts.length + ' 条\n映射: ' + mergedMappings.length + ' 条');
+        } catch (error) {
+            console.error('GitHub 同步失败:', error);
+            showToast('同步失败：' + (error.message || '未知错误'), '#f44336', 5000);
+            alert('数据同步失败：' + (error.message || '未知错误'));
+        }
+        return;
+    }
+
+    if (!await ensureCloud()) return;
+
+    const totalItems = products.length + productMappings.length;
+    if (totalItems === 0) {
+        alert('没有数据需要同步！');
+        return;
+    }
+
+    showToast('正在同步数据到云端...', '#4CAF50', 60000);
+
+    try {
+        const productResult = await upsertCollection(PRODUCT_COLLECTION, products);
+        const mappingResult = await upsertCollection(MAPPING_COLLECTION, productMappings);
+
+        const successCount = productResult.success + mappingResult.success;
+        const failCount = productResult.fail + mappingResult.fail;
+
+        showToast(
+            '数据同步完成：成功 ' + successCount + ' 项，失败 ' + failCount + ' 项',
+            failCount === 0 ? '#45a049' : '#ff9800',
+            5000
+        );
+        alert('数据同步完成！\n共 ' + totalItems + ' 项\n成功: ' + successCount + ' 项\n失败: ' + failCount + ' 项');
+    } catch (error) {
+        console.error('数据同步失败:', error);
+        showToast('同步失败：' + (error.message || '未知错误'), '#f44336', 5000);
+        alert('数据同步失败：' + (error.message || '未知错误'));
+    }
+}
+
+// 把本地数组写入云端集合。
+// 商品按 uid 匹配；映射按条码匹配（一个条码本来就只该有一条映射）
+async function upsertCollection(collectionName, localItems) {
+    const isProduct = collectionName === PRODUCT_COLLECTION;
+    const fields = isProduct
+        ? ['uid', 'barcode', 'productName', 'type', 'scanDate', 'productionDate', 'shelfLife', 'shelfLifeUnit', 'validity']
+        : ['barcode', 'productName'];
+
+    // 1. 拉取云端已有记录，建立「匹配键 -> _id」映射
+    const cloudItems = await fetchAllFromCloud(collectionName);
+    const idByKey = {};
+    const legacyIdByBarcode = {};   // 迁移用：还没有 uid 的历史记录
+
+    cloudItems.forEach(function(doc) {
+        if (isProduct) {
+            if (doc.uid) idByKey[doc.uid] = doc._id;
+            else if (doc.barcode) legacyIdByBarcode[doc.barcode] = doc._id;
+        } else if (doc.barcode) {
+            idByKey[doc.barcode] = doc._id;
+        }
+    });
+
+    // 历史记录只能被认领一次，否则同条码的第二条又会覆盖到同一条上
+    function takeLegacyId(barcode) {
+        const id = legacyIdByBarcode[barcode];
+        if (id) delete legacyIdByBarcode[barcode];
+        return id;
+    }
+
+    // 2. 区分「需新增」和「需更新」
+    const toAdd = [];
+    const toUpdate = [];
+
+    localItems.forEach(function(item) {
+        if (item.barcode === undefined || item.barcode === null || item.barcode === '') return;
+
+        if (isProduct && !item.uid) item.uid = makeUid();
+
+        const data = {};
+        fields.forEach(function(field) {
+            data[field] = item[field] === undefined || item[field] === null ? '' : item[field];
         });
-        
-        // 初始化映射数据监听
-        const Mapping = AV.Object.extend('Mapping');
-        const mappingQuery = new AV.Query(Mapping);
-        
-        // 订阅映射数据变更
-        AV.LiveQuery.subscribe(mappingQuery).then(mappingSubscription => {
-            console.log('成功订阅映射数据变更');
-            
-            // 处理映射创建事件
-            mappingSubscription.on('create', function(mapping) {
-                console.log('收到映射创建事件:', mapping.get('barcode'));
-                showRealTimeNotification('映射添加', `条码 ${mapping.get('barcode')} 映射到 ${mapping.get('productName')} 已添加`);
-            });
-            
-            // 处理映射更新事件
-            mappingSubscription.on('update', function(mapping) {
-                console.log('收到映射更新事件:', mapping.get('barcode'));
-                showRealTimeNotification('映射更新', `条码 ${mapping.get('barcode')} 映射到 ${mapping.get('productName')} 已更新`);
-            });
-            
-            // 处理映射删除事件
-            mappingSubscription.on('delete', function(mapping) {
-                console.log('收到映射删除事件:', mapping.get('barcode'));
-                showRealTimeNotification('映射删除', `条码 ${mapping.get('barcode')} 的映射已删除`);
-            });
-        }).catch(error => {
-            console.error('订阅映射数据变更失败:', error);
-            // 不再自动设置定期同步
+
+        const existedId = isProduct
+            ? (idByKey[item.uid] || takeLegacyId(item.barcode))
+            : idByKey[item.barcode];
+
+        if (existedId) {
+            toUpdate.push({ id: existedId, data: data });
+        } else {
+            toAdd.push(data);
+        }
+    });
+
+    let success = 0;
+    let fail = 0;
+
+    // 3. 批量新增（SDK 支持数组一次性写入）
+    if (toAdd.length > 0) {
+        try {
+            await cbDb.collection(collectionName).add(toAdd);
+            success += toAdd.length;
+        } catch (error) {
+            console.error('批量新增失败，改为逐条写入:', error);
+            for (let i = 0; i < toAdd.length; i++) {
+                try {
+                    await cbDb.collection(collectionName).add(toAdd[i]);
+                    success++;
+                } catch (e) {
+                    fail++;
+                    console.error('新增失败:', e);
+                }
+            }
+        }
+    }
+
+    // 4. 逐条更新（每批 20 条并发）
+    const CHUNK = 20;
+    for (let i = 0; i < toUpdate.length; i += CHUNK) {
+        const chunk = toUpdate.slice(i, i + CHUNK);
+        const results = await Promise.all(chunk.map(function(updateItem) {
+            return cbDb.collection(collectionName)
+                .doc(updateItem.id)
+                .update(updateItem.data)
+                .then(function() { return true; })
+                .catch(function(e) {
+                    console.error('更新失败:', e);
+                    return false;
+                });
+        }));
+        results.forEach(function(ok) { ok ? success++ : fail++; });
+    }
+
+    return { success: success, fail: fail };
+}
+
+// 从云端获取最新数据（覆盖本地）
+async function fetchLatestDataFromCloud() {
+    /* ---- GitHub 存储 ---- */
+    if (IS_GITHUB_PAGES) {
+        if (!await ensureGhToken()) return;
+
+        showToast('正在从 GitHub 获取最新数据 ...', '#2196F3', 60000);
+
+        try {
+            const cloud = await ghLoad();
+
+            // 与本地合并，而不是直接覆盖：云端万一比本地旧，覆盖会把本地记录整片抹掉
+            const mergedProducts = mergeProductsByUid(cloud.products, products);
+            const mergedMappings = mergeMappingsByBarcode(cloud.mappings, productMappings);
+            const addedProducts = mergedProducts.length - products.length;
+            const addedMappings = mergedMappings.length - productMappings.length;
+
+            products = mergedProducts;
+            productMappings = mergedMappings;
+            saveProducts();
+            saveMappings();
+            updateProductList();
+            updateMappingList();
+            updateChart();
+
+            showToast('获取完成：商品 ' + mergedProducts.length + ' 条', '#45a049', 5000);
+            alert('已与云端数据合并！\n商品: ' + mergedProducts.length + ' 条（新增 ' + addedProducts + ' 条）\n' +
+                  '映射: ' + mergedMappings.length + ' 条（新增 ' + addedMappings + ' 条）');
+        } catch (error) {
+            console.error('GitHub 获取数据失败:', error);
+            showToast('获取失败：' + (error.message || '未知错误'), '#f44336', 5000);
+            alert('数据获取失败：' + (error.message || '未知错误'));
+        }
+        return;
+    }
+
+    if (!await ensureCloud()) return;
+
+    showToast('正在从云端获取最新数据...', '#2196F3', 60000);
+
+    try {
+        const cloudProducts = await fetchAllFromCloud(PRODUCT_COLLECTION);
+        const cloudMappings = await fetchAllFromCloud(MAPPING_COLLECTION);
+
+        // 商品：先转成本地结构，再按 uid 与本地合并（不再直接覆盖）
+        const cloudProductsLocal = cloudProducts.map(function(doc) {
+            return {
+                id: doc.uid || doc._id,      // 兼容旧字段
+                uid: doc.uid || '',          // 空 uid 会在合并时补上，下次同步回填云端
+                barcode: doc.barcode,
+                productName: doc.productName,
+                type: doc.type || '商品',
+                scanDate: doc.scanDate || '',
+                productionDate: doc.productionDate || '',
+                shelfLife: doc.shelfLife || '',
+                shelfLifeUnit: doc.shelfLifeUnit || '月',
+                validity: doc.validity || '',
+                createdAt: doc._createTime
+                    ? new Date(doc._createTime).toISOString()
+                    : new Date().toISOString()
+            };
         });
-        
-        console.log('实时数据监听初始化完成');
-        
+
+        const mergedProducts = mergeProductsByUid(cloudProductsLocal, products);
+        const addedProducts = mergedProducts.length - products.length;
+
+        products = mergedProducts;
+        saveProducts();
+        updateProductList();
+        updateChart();
+
+        // 映射仍按条码合并
+        const mergedMappings = mergeMappingsByBarcode(cloudMappings.map(function(doc) {
+            return {
+                id: doc._id,
+                barcode: doc.barcode,
+                productName: doc.productName
+            };
+        }), productMappings);
+        const addedMappings = mergedMappings.length - productMappings.length;
+
+        productMappings = mergedMappings;
+        saveMappings();
+        updateMappingList();
+
+        showToast(
+            '数据获取完成：商品 ' + mergedProducts.length + ' 条，映射 ' + mergedMappings.length + ' 条',
+            '#45a049',
+            5000
+        );
+        alert('已与云端数据合并！\n商品: ' + mergedProducts.length + ' 条（新增 ' + addedProducts + ' 条）\n' +
+              '映射: ' + mergedMappings.length + ' 条（新增 ' + addedMappings + ' 条）');
+    } catch (error) {
+        console.error('获取云端数据失败:', error);
+        showToast('获取失败：' + (error.message || '未知错误'), '#f44336', 5000);
+        alert('数据获取失败：' + (error.message || '未知错误'));
+    }
+}
+
+/* ===================== 11. 实时数据监听 ===================== */
+function startRealtimeWatch() {
+    if (!cloudReady) {
+        console.log('云端未就绪，跳过实时数据监听');
+        return;
+    }
+
+    closeCloudWatchers();
+
+    try {
+        // 监听商品集合
+        const productWatcher = cbDb.collection(PRODUCT_COLLECTION).watch({
+            onChange: function(snapshot) {
+                if (!snapshot || snapshot.type === 'init') return;
+                (snapshot.docChanges || []).forEach(function(change) {
+                    const doc = change.doc || {};
+                    const label = doc.productName || doc.barcode || '';
+                    if (change.dataType === 'add') {
+                        showToast('新商品添加：' + label, '#2196F3');
+                    } else if (change.dataType === 'update') {
+                        showToast('商品更新：' + label, '#2196F3');
+                    } else if (change.dataType === 'remove') {
+                        showToast('云端有商品被删除', '#ff9800');
+                    }
+                });
+            },
+            onError: function(error) {
+                console.error('商品实时监听错误:', error);
+            }
+        });
+        cloudWatchers.push(productWatcher);
+
+        // 监听映射集合
+        const mappingWatcher = cbDb.collection(MAPPING_COLLECTION).watch({
+            onChange: function(snapshot) {
+                if (!snapshot || snapshot.type === 'init') return;
+                (snapshot.docChanges || []).forEach(function(change) {
+                    const doc = change.doc || {};
+                    if (change.dataType === 'add') {
+                        showToast('新映射添加：' + (doc.barcode || ''), '#2196F3');
+                    } else if (change.dataType === 'update') {
+                        showToast('映射更新：' + (doc.barcode || ''), '#2196F3');
+                    } else if (change.dataType === 'remove') {
+                        showToast('云端有映射被删除', '#ff9800');
+                    }
+                });
+            },
+            onError: function(error) {
+                console.error('映射实时监听错误:', error);
+            }
+        });
+        cloudWatchers.push(mappingWatcher);
+
+        console.log('实时数据监听已启动');
     } catch (error) {
         console.error('初始化实时数据监听失败:', error);
-        // 不再自动设置定期同步
     }
 }
 
-// 设置定期同步（作为LiveQuery的替代方案）
-function setupPeriodicSync(interval = 30000) {
-    console.log('设置定期同步机制');
-    
-    // 清除可能存在的旧定时器
-    if (window.periodicSyncInterval) {
-        clearInterval(window.periodicSyncInterval);
-    }
-    
-    // 设置新的定时器
-    window.periodicSyncInterval = setInterval(() => {
-        console.log('定期同步数据中...');
-        fetchLatestDataFromCloud();
-    }, interval);
-    
-    // 显示通知
-    showRealTimeNotification('定期同步已启动', `应用将每 ${interval / 1000} 秒自动同步云端数据`);
-}
-
-// 显示实时数据通知
-function showRealTimeNotification(title, message) {
-    const notification = document.createElement('div');
-    notification.style.position = 'fixed';
-    notification.style.top = '20px';
-    notification.style.left = '50%';
-    notification.style.transform = 'translateX(-50%)';
-    notification.style.backgroundColor = '#2196F3';
-    notification.style.color = 'white';
-    notification.style.padding = '12px 20px';
-    notification.style.borderRadius = '8px';
-    notification.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-    notification.style.zIndex = '2000';
-    notification.style.fontSize = '14px';
-    notification.style.transition = 'all 0.3s ease';
-    notification.style.maxWidth = '80%';
-    notification.innerHTML = `<strong>${title}:</strong> ${message}`;
-    
-    document.body.appendChild(notification);
-    
-    // 3秒后自动移除通知
-    setTimeout(() => {
-        notification.style.opacity = '0';
-        notification.style.transform = 'translateX(-50%) translateY(-20px)';
-        setTimeout(() => {
-            if (document.body.contains(notification)) {
-                document.body.removeChild(notification);
-            }
-        }, 300);
-    }, 3000);
+// 关闭全部实时监听
+function closeCloudWatchers() {
+    cloudWatchers.forEach(function(watcher) {
+        try {
+            watcher.close();
+        } catch (e) {
+            // 忽略关闭异常
+        }
+    });
+    cloudWatchers = [];
 }

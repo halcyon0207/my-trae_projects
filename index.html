@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>商品到期提醒系统</title>
     <link rel="stylesheet" href="styles.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://unpkg.com/leancloud-storage@4.15.0/dist/av-min.js"></script>
+    <!-- 图表库、扫码库都放在本地，避免国内访问 CDN 不稳定甚至加载不出来 -->
+    <script src="chart.umd.js"></script>
+    <script src="html5-qrcode.min.js"></script>
+    <!-- CloudBase SDK 体积较大且只在腾讯云模式用到，改为需要时再动态加载（见 script.js） -->
 </head>
 <body>
     <div class="container">
@@ -15,13 +17,19 @@
         </header>
 
         <main>
+            <!-- 到期提醒横幅（有临期 / 过期商品时由 script.js 显示出来） -->
+            <section id="reminderBanner" class="reminder-banner" style="display: none;"></section>
+
             <!-- 商品输入表单 -->
             <section class="form-section">
                 <h2>添加商品</h2>
                 <form id="productForm">
                     <div class="form-group">
                         <label for="barcode">商品条码:</label>
-                        <input type="text" id="barcode" name="barcode" placeholder="扫描或输入条码" required>
+                        <div class="barcode-input-wrapper">
+                            <input type="text" id="barcode" name="barcode" placeholder="扫描或输入条码" required>
+                            <button type="button" id="scanBtn" class="btn-scan" title="摄像头扫码">📷</button>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label for="productName">商品名称:</label>
@@ -33,8 +41,15 @@
                             <input type="date" id="productionDate" name="productionDate">
                         </div>
                         <div class="form-group">
-                            <label for="shelfLife">保质期(月):</label>
-                            <input type="number" id="shelfLife" name="shelfLife" min="1" placeholder="输入月份">
+                            <label for="shelfLife">保质期:</label>
+                            <div class="shelf-life-wrapper">
+                                <input type="number" id="shelfLife" name="shelfLife" min="1" placeholder="数量">
+                                <select id="shelfLifeUnit" name="shelfLifeUnit">
+                                    <option value="天">天</option>
+                                    <option value="月" selected>个月</option>
+                                    <option value="年">年</option>
+                                </select>
+                            </div>
                         </div>
                         <div class="form-group">
                             <label for="validity">有效期:</label>
@@ -81,7 +96,7 @@
                                 <th>类型</th>
                                 <th>扫描日期</th>
                                 <th>生产日期</th>
-                                <th>保质期(月)</th>
+                                <th>保质期</th>
                                 <th>条码</th>
                                 <th>操作</th>
                             </tr>
@@ -123,6 +138,19 @@
                 </div>
             </section>
         </main>
+    </div>
+
+    <!-- 摄像头扫码弹窗 -->
+    <div id="scannerModal" class="scanner-modal" style="display: none;">
+        <div class="scanner-content">
+            <h3>扫描商品条码</h3>
+            <div id="reader"></div>
+            <p class="scanner-hint">把条码横着放进亮框、尽量贴近并填满框的宽度，识别最快</p>
+            <div class="scanner-actions">
+                <button type="button" id="torchBtn" class="btn btn-info" style="display: none;">开灯</button>
+                <button type="button" id="stopScanBtn" class="btn btn-danger">取消扫描</button>
+            </div>
+        </div>
     </div>
 
     <script src="script.js"></script>
