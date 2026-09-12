@@ -5,9 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>商品到期提醒系统</title>
     <link rel="stylesheet" href="styles.css">
+    <!-- 图表库、扫码库都放在本地，避免国内访问 CDN 不稳定甚至加载不出来 -->
     <script src="chart.umd.js"></script>
-    <script src="https://static.cloudbase.net/cloudbase-js-sdk/3.9.3/cloudbase.full.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="html5-qrcode.min.js"></script>
+    <!-- CloudBase SDK 体积较大且只在腾讯云模式用到，改为需要时再动态加载（见 script.js） -->
 </head>
 <body>
     <div class="container">
@@ -37,8 +38,15 @@
                             <input type="date" id="productionDate" name="productionDate">
                         </div>
                         <div class="form-group">
-                            <label for="shelfLife">保质期(月):</label>
-                            <input type="number" id="shelfLife" name="shelfLife" min="1" placeholder="输入月份">
+                            <label for="shelfLife">保质期:</label>
+                            <div class="shelf-life-wrapper">
+                                <input type="number" id="shelfLife" name="shelfLife" min="1" placeholder="数量">
+                                <select id="shelfLifeUnit" name="shelfLifeUnit">
+                                    <option value="天">天</option>
+                                    <option value="月" selected>个月</option>
+                                    <option value="年">年</option>
+                                </select>
+                            </div>
                         </div>
                         <div class="form-group">
                             <label for="validity">有效期:</label>
@@ -85,7 +93,7 @@
                                 <th>类型</th>
                                 <th>扫描日期</th>
                                 <th>生产日期</th>
-                                <th>保质期(月)</th>
+                                <th>保质期</th>
                                 <th>条码</th>
                                 <th>操作</th>
                             </tr>
@@ -134,7 +142,11 @@
         <div class="scanner-content">
             <h3>扫描商品条码</h3>
             <div id="reader"></div>
-            <button type="button" id="stopScanBtn" class="btn btn-danger">取消扫描</button>
+            <p class="scanner-hint">把条码横着放进亮框、尽量贴近并填满框的宽度，识别最快</p>
+            <div class="scanner-actions">
+                <button type="button" id="torchBtn" class="btn btn-info" style="display: none;">开灯</button>
+                <button type="button" id="stopScanBtn" class="btn btn-danger">取消扫描</button>
+            </div>
         </div>
     </div>
 
