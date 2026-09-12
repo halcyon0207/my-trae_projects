@@ -38,6 +38,18 @@ let ghSha = null;         // 数据文件当前版本号（写入时必需）
 let products = JSON.parse(localStorage.getItem('products')) || [];
 let productMappings = JSON.parse(localStorage.getItem('productMappings')) || [];
 
+// 已删除记录的「墓碑」（带 deletedAt 的删除标记）。
+//
+// 删除不能只是把记录抹掉：别的设备手里还留着那份旧副本，
+// 下次同步时它会像没事一样把记录带回来 —— 这就是「A 机删了，B 机一同步又回来」。
+// 所以删除时留一条墓碑，同步时墓碑和记录一起比时间，谁新谁赢：
+//   · 墓碑更新 → 记录被删掉，别的设备手里的旧副本也一并消失
+//   · 记录更新 → 这条在别处被改过，以改动为准，墓碑作废（删完还能救回来）
+//
+// 墓碑单独放一个数组，列表、图表、导出都只看 products，不用为删除改一遍。
+let productTombstones = JSON.parse(localStorage.getItem('productTombstones')) || [];
+let mappingTombstones = JSON.parse(localStorage.getItem('mappingTombstones')) || [];
+
 // 全局变量：当前显示模式（all 或 filter）
 let currentDisplayMode = 'all';
 
@@ -868,6 +880,12 @@ function saveMappings() {
     localStorage.setItem('productMappings', JSON.stringify(productMappings));
 }
 
+// 保存删除标记（墓碑）
+function saveTombstones() {
+    localStorage.setItem('productTombstones', JSON.stringify(productTombstones));
+    localStorage.setItem('mappingTombstones', JSON.stringify(mappingTombstones));
+}
+
 /* ===================== 5.5 处置状态（保留原始记录，不删除） ===================== */
 // 过期/用不上的商品不删掉，只在记录上挂一份处置信息：
 //   handledAt     处置日期（有值即视为已处理；老数据没这个字段 = 未处理，无需迁移）
@@ -1357,54 +1375,28 @@ window.deleteProduct = function(id) {
     }
 
     const productToDelete = products.find(isTarget);
+    if (!productToDelete) {
+        showToast('没找到这条记录，可能已经被删掉了', '#ff9800');
+        return;
+    }
+
+    // 留一条墓碑，而不是从云端直接抹掉：
+    // 抹掉之后就再没有任何线索能说明「这条是被删的」，
+    // 别的设备手里那份旧副本一同步就会把它原样带回来
+    const deletedAt = new Date().toISOString();
+    productTombstones.push(makeProductTombstone(productToDelete, deletedAt));
 
     products = products.filter(function(p) { return !isTarget(p); });
 
     saveProducts();
+    saveTombstones();
     updateProductList();
     updateChart();
     updateReminder();
 
-    // 同步删除云端数据：只删这一条，不再把同条码的其他批次一起删掉
-    if (productToDelete && productToDelete.barcode) {
-        const targetUid = productToDelete.uid;
-
-        if (IS_GITHUB_PAGES) {
-            // GitHub 存储：重新拉取 → 过滤掉该条 → 写回
-            if (ghToken) {
-                ghLoad()
-                    .then(function(cloud) {
-                        const remainProducts = cloud.products.filter(function(p) {
-                            // 有 uid 就按 uid 比；云端老记录没 uid 时退回「条码 + 生产日期」比
-                            if (targetUid && p.uid) return String(p.uid) !== String(targetUid);
-                            return productFingerprint(p) !== productFingerprint(productToDelete);
-                        });
-                        const remainMappings = cloud.mappings.filter(function(m) {
-                            return m.barcode !== productToDelete.barcode;
-                        });
-                        return ghSave(remainProducts, remainMappings, '删除商品：' + productToDelete.barcode);
-                    })
-                    .then(function() {
-                        console.log('GitHub 数据已同步删除:', productToDelete.barcode);
-                    })
-                    .catch(function(error) {
-                        console.error('GitHub 删除失败:', error);
-                        showToast('云端删除失败：' + (error.message || '未知错误'), '#ff9800');
-                    });
-            }
-        } else if (cloudReady) {
-            cbDb.collection(PRODUCT_COLLECTION)
-                .where(targetUid ? { uid: targetUid } : { barcode: productToDelete.barcode })
-                .remove()
-                .then(function() {
-                    console.log('云端商品已删除:', productToDelete.barcode);
-                })
-                .catch(function(error) {
-                    console.error('云端删除失败:', error);
-                    showToast('云端删除失败：' + (error.message || '未知错误'), '#ff9800');
-                });
-        }
-    }
+    // 墓碑立刻推到云端，别的设备下次「获取最新数据」就能看到这条没了。
+    // 推失败也无所谓：本机已经删掉了，下次点「同步」会补上
+    pushTombstonesQuietly();
 };
 
 /* ===================== 8.1 标记处理 / 撤销处理 ===================== */
@@ -1609,9 +1601,22 @@ window.editMapping = function(id) {
 window.deleteMapping = function(id) {
     if (!confirm('确定要删除这个映射吗？')) return;
 
+    const mappingToDelete = productMappings.find(function(m) { return m.id == id; });
+    if (!mappingToDelete) {
+        showToast('没找到这个映射，可能已经被删掉了', '#ff9800');
+        return;
+    }
+
+    // 和商品一样留墓碑：不然别的设备一同步，这个映射又回来了
+    const deletedAt = new Date().toISOString();
+    mappingTombstones.push(makeMappingTombstone(mappingToDelete, deletedAt));
+
     productMappings = productMappings.filter(function(m) { return m.id != id; });
     saveMappings();
+    saveTombstones();
     updateMappingList();
+
+    pushTombstonesQuietly();
 };
 
 /* ===================== 8. CSV 导入导出 ===================== */
@@ -1832,8 +1837,14 @@ function clearAllData() {
 
     products = [];
     productMappings = [];
+    // 删除标记（墓碑）一并清掉：清空就是清空。
+    // 清掉也不会让删过的记录借别的设备复活 —— 墓碑删除时已经推到云端了，
+    // 云端那份还在，别处的旧副本照样会被它删掉
+    productTombstones = [];
+    mappingTombstones = [];
     saveProducts();
     saveMappings();
+    saveTombstones();
     updateProductList();
     updateMappingList();
     updateChart();
@@ -1915,6 +1926,8 @@ function updateChart() {
 function loadData() {
     products = JSON.parse(localStorage.getItem('products')) || [];
     productMappings = JSON.parse(localStorage.getItem('productMappings')) || [];
+    productTombstones = JSON.parse(localStorage.getItem('productTombstones')) || [];
+    mappingTombstones = JSON.parse(localStorage.getItem('mappingTombstones')) || [];
 
     // 老数据没有 uid，这里补上并立刻落盘（云端的老记录会在同步时认领）
     if (products.some(function(p) { return !p.uid; })) {
@@ -1957,6 +1970,35 @@ function buildUidIndex(list) {
     return index;
 }
 
+/* ---- 删除标记（墓碑） ---- */
+// 判断一条记录是「活记录」还是「删除标记」
+function isTombstone(record) {
+    return !!(record && record.deletedAt);
+}
+
+// 商品墓碑：留着条码和生产日期，因为云端还挂着没 uid 的老记录时，
+// 只能靠「条码 + 生产日期」这个指纹把它认出来（见 mergeProducts）
+function makeProductTombstone(product, deletedAt) {
+    return {
+        uid: product.uid || '',
+        barcode: product.barcode || '',
+        productName: product.productName || '',
+        productionDate: product.productionDate || '',
+        deletedAt: deletedAt,
+        updatedAt: deletedAt
+    };
+}
+
+// 映射墓碑：映射按条码唯一，有条码就够了
+function makeMappingTombstone(mapping, deletedAt) {
+    return {
+        barcode: mapping.barcode || '',
+        productName: mapping.productName || '',
+        deletedAt: deletedAt,
+        updatedAt: deletedAt
+    };
+}
+
 /* ---- 记录的最后修改时间：跨设备同步靠它判断「哪份更新」 ---- */
 // 记录被改动时打一次时间戳。新增、编辑、标记处置、撤销处置、改名、导入都要调。
 function touchRecord(record) {
@@ -1975,8 +2017,23 @@ function recordModifiedTime(record) {
     const updated = Date.parse(record.updatedAt);
     if (!isNaN(updated)) return updated;
 
+    // 墓碑万一没有 updatedAt，至少要按删除时间算
+    const deleted = Date.parse(record.deletedAt);
+    if (!isNaN(deleted)) return deleted;
+
     const handled = Date.parse(record.handledAt);
     return isNaN(handled) ? 0 : handled;
+}
+
+// 统计 listB 里有、listA 里没有的记录条数（按 key 比）。只为提示里的「新增/删除」计数
+function countOnlyIn(listA, listB, key) {
+    const keys = {};
+    (listA || []).forEach(function(item) {
+        if (item) keys[String(item[key])] = true;
+    });
+    return (listB || []).filter(function(item) {
+        return item && !keys[String(item[key])];
+    }).length;
 }
 
 // 同一条记录两边都有时，取最后修改时间更晚的那条。
@@ -1991,54 +2048,146 @@ function pickNewerRecord(cloudRecord, localRecord, preferLocal) {
     return cloudTime > localTime ? cloudRecord : localRecord;
 }
 
-// 按 uid 合并两份商品列表。
+// 按 uid 合并商品，返回 { products, tombstones }：
+//   products   —— 活记录，同 uid 的冲突逐条比最后修改时间，谁新用谁
+//   tombstones —— 生效的删除标记，两边都留着，下次同步继续压制别的设备手里的旧副本
 //
-// 同 uid 的冲突不再是「一边通吃」，而是逐条比最后修改时间，谁新用谁：
-//   · 本机是旧副本时，盖不掉云端的新状态（例如别的设备刚标记的处置）
-//   · 本机刚改过的记录，照样能推上去
-// 于是推送和拉取两个方向都不会丢数据，先点哪个按钮都不影响结果。
-// preferLocal 只在时间打平时起作用（两边都没改过、内容却不一样）。
-function mergeProductsByUid(cloudList, localList, preferLocal) {
+// 云端那份里混着墓碑（带 deletedAt），先拆开。删除与「删完又改」的判定：
+//   · 墓碑更新 → 记录被删掉，别的设备手里的旧副本也一并消失
+//   · 记录更新 → 这条在别处被改过，以改动为准，墓碑作废（删完还能救回来）
+// 加上原有的「谁新谁赢」，推送和拉取两个方向都不会丢数据，
+// 先点「同步」还是先点「获取最新数据」都不影响结果。
+// preferLocal 只在时间打平时起作用（两边都没动过、内容却不一样）。
+function mergeProducts(cloudList, localList, localTombstones, preferLocal) {
+    // 云端列表里混着墓碑，先按 deletedAt 拆开
+    const cloudLive = [];
+    const cloudTombstones = [];
+    (cloudList || []).forEach(function(record) {
+        if (!record) return;
+        (isTombstone(record) ? cloudTombstones : cloudLive).push(record);
+    });
+
     // 必须先给本地记录补齐 uid，再按指纹建索引。
     // 否则本地记录恰好都没 uid 时，云端的老记录匹配不到、会被当成新记录重复插入。
     const localWithUid = ensureProductUids(localList, null);
     const uidIndex = buildUidIndex(localWithUid);
-    const cloudWithUid = ensureProductUids(cloudList, uidIndex);
+    const cloudWithUid = ensureProductUids(cloudLive, uidIndex);
 
-    // 云端那份先铺底，输出顺序就稳定，同步前后列表不会莫名重排
-    const map = new Map();
+    // 1. 活记录：云端那份先铺底，输出顺序就稳定，同步前后列表不会莫名重排
+    const liveByUid = new Map();
     cloudWithUid.forEach(function(product) {
-        map.set(String(product.uid), product);
+        liveByUid.set(String(product.uid), product);
     });
 
     localWithUid.forEach(function(product) {
         const key = String(product.uid);
-        const cloudRecord = map.get(key);
-        // 只在本机存在、云端没有的记录，走下面这行原样留下
-        map.set(key, cloudRecord ? pickNewerRecord(cloudRecord, product, preferLocal) : product);
+        const cloudRecord = liveByUid.get(key);
+        // 只在本机存在、云端没有的记录，走 else 分支原样留下
+        liveByUid.set(key, cloudRecord ? pickNewerRecord(cloudRecord, product, preferLocal) : product);
     });
 
-    return Array.from(map.values());
+    // 2. 墓碑：同一件东西两边可能各留过一条（删了又删），取时间最新的那条
+    const tombByKey = new Map();
+
+    function rememberTombstone(tombstone) {
+        if (!tombstone || !tombstone.barcode) return;
+
+        const key = tombstone.uid ? 'u' + tombstone.uid : 'f' + productFingerprint(tombstone);
+        const existing = tombByKey.get(key);
+        if (!existing || recordModifiedTime(tombstone) > recordModifiedTime(existing)) {
+            tombByKey.set(key, tombstone);
+        }
+    }
+
+    cloudTombstones.forEach(rememberTombstone);
+    (localTombstones || []).forEach(rememberTombstone);
+
+    // 3. 墓碑与活记录对账
+    const liveByFingerprint = new Map();
+    liveByUid.forEach(function(product) {
+        liveByFingerprint.set(productFingerprint(product), product);
+    });
+
+    const deletedUids = new Set();
+    const tombstones = [];
+
+    tombByKey.forEach(function(tombstone) {
+        // 优先按 uid 找；云端还挂着没 uid 的老记录时，靠「条码 + 生产日期」认领
+        let target = tombstone.uid ? liveByUid.get(String(tombstone.uid)) : null;
+        if (!target) target = liveByFingerprint.get(productFingerprint(tombstone));
+
+        if (target && recordModifiedTime(target) > recordModifiedTime(tombstone)) {
+            return;   // 删掉之后又在别处改过 → 以改动为准，墓碑作废
+        }
+        if (target) deletedUids.add(String(target.uid));
+        tombstones.push(tombstone);
+    });
+
+    return {
+        products: Array.from(liveByUid.values()).filter(function(product) {
+            return !deletedUids.has(String(product.uid));
+        }),
+        tombstones: tombstones
+    };
 }
 
 // 映射按条码合并：一个条码本来就只该对应一个名称，这里特意不用 uid。
-// 冲突判定与 mergeProductsByUid 一致：先比修改时间，打平才看 preferLocal
-function mergeMappingsByBarcode(cloudList, localList, preferLocal) {
-    const map = new Map();
+// 冲突判定与 mergeProducts 一致（先比修改时间，打平才看 preferLocal），同样返回墓碑
+function mergeMappings(cloudList, localList, localTombstones, preferLocal) {
+    const cloudLive = [];
+    const cloudTombstones = [];
 
-    (cloudList || []).forEach(function(mapping) {
-        if (mapping && mapping.barcode) map.set(String(mapping.barcode), mapping);
+    (cloudList || []).forEach(function(record) {
+        if (!record || !record.barcode) return;
+        (isTombstone(record) ? cloudTombstones : cloudLive).push(record);
+    });
+
+    const liveByBarcode = new Map();
+    cloudLive.forEach(function(mapping) {
+        liveByBarcode.set(String(mapping.barcode), mapping);
     });
 
     (localList || []).forEach(function(mapping) {
         if (!mapping || !mapping.barcode) return;
 
         const key = String(mapping.barcode);
-        const cloudRecord = map.get(key);
-        map.set(key, cloudRecord ? pickNewerRecord(cloudRecord, mapping, preferLocal) : mapping);
+        const cloudRecord = liveByBarcode.get(key);
+        liveByBarcode.set(key, cloudRecord ? pickNewerRecord(cloudRecord, mapping, preferLocal) : mapping);
     });
 
-    return Array.from(map.values());
+    const tombByBarcode = new Map();
+
+    function rememberTombstone(tombstone) {
+        if (!tombstone || !tombstone.barcode) return;
+
+        const key = String(tombstone.barcode);
+        const existing = tombByBarcode.get(key);
+        if (!existing || recordModifiedTime(tombstone) > recordModifiedTime(existing)) {
+            tombByBarcode.set(key, tombstone);
+        }
+    }
+
+    cloudTombstones.forEach(rememberTombstone);
+    (localTombstones || []).forEach(rememberTombstone);
+
+    const deletedBarcodes = new Set();
+    const tombstones = [];
+
+    tombByBarcode.forEach(function(tombstone) {
+        const target = liveByBarcode.get(String(tombstone.barcode));
+        if (target && recordModifiedTime(target) > recordModifiedTime(tombstone)) {
+            return;   // 删掉之后又改过 → 以改动为准，墓碑作废
+        }
+        if (target) deletedBarcodes.add(String(target.barcode));
+        tombstones.push(tombstone);
+    });
+
+    return {
+        mappings: Array.from(liveByBarcode.values()).filter(function(mapping) {
+            return !deletedBarcodes.has(String(mapping.barcode));
+        }),
+        tombstones: tombstones
+    };
 }
 
 /* ---- 云端文档 → 本地记录 ---- */
@@ -2060,6 +2209,7 @@ function cloudDocToProduct(doc) {
         handledAt: doc.handledAt || '',
         handledNote: doc.handledNote || '',
         updatedAt: doc.updatedAt || '',   // 缺了它就只能退回 handledAt 兜底
+        deletedAt: doc.deletedAt || '',   // 有值 = 这条是删除标记（墓碑），不是活记录
         createdAt: doc._createTime
             ? new Date(doc._createTime).toISOString()
             : new Date().toISOString()
@@ -2071,18 +2221,75 @@ function cloudDocToMapping(doc) {
         id: doc._id,
         barcode: doc.barcode,
         productName: doc.productName,
-        updatedAt: doc.updatedAt || ''
+        updatedAt: doc.updatedAt || '',
+        deletedAt: doc.deletedAt || ''   // 有值 = 删除标记（墓碑）
     };
 }
 
 /* ===================== 10. 云端同步 ===================== */
+
+// GitHub 存储：与云端对账后写回，并让本机收敛到合并结果。
+// 「同步数据」按钮和「删除后静默推送」共用这一段。
+async function saveMergedToGithub(cloud, message) {
+    const mergedProducts = mergeProducts(cloud.products, products, productTombstones, true);
+    const mergedMappings = mergeMappings(cloud.mappings, productMappings, mappingTombstones, true);
+
+    // 墓碑以「带 deletedAt 的记录」的形式和活记录一起写进 data.json：
+    // 不另开一段存储，别的设备一读就知道这条是被删掉的
+    await ghSave(
+        mergedProducts.products.concat(mergedProducts.tombstones),
+        mergedMappings.mappings.concat(mergedMappings.tombstones),
+        message
+    );
+
+    products = mergedProducts.products;
+    productTombstones = mergedProducts.tombstones;
+    productMappings = mergedMappings.mappings;
+    mappingTombstones = mergedMappings.tombstones;
+
+    saveProducts();
+    saveMappings();
+    saveTombstones();
+    updateProductList();
+    updateMappingList();
+    updateChart();
+    updateReminder();
+
+    return { productCount: products.length, mappingCount: productMappings.length };
+}
+
+// 删除后立刻把墓碑推上云端，不用等用户再点一次「同步」。
+// 推不上去也不回滚：本机已经删掉了，下次点「同步」会把墓碑补上去
+async function pushTombstonesQuietly() {
+    try {
+        if (IS_GITHUB_PAGES) {
+            if (!ghToken) return;   // 还没填令牌，等点「同步」时一起走
+            const cloud = await ghLoad();
+            await saveMergedToGithub(cloud, '删除记录');
+            return;
+        }
+
+        if (!cloudReady) return;   // 云端没连上，等点「同步」时一起走
+
+        // 墓碑就是「带 deletedAt 的文档」，按 uid / 条码 upsert 到同一个集合里
+        await upsertCollection(PRODUCT_COLLECTION, productTombstones, null);
+        await upsertCollection(MAPPING_COLLECTION, mappingTombstones, null);
+    } catch (error) {
+        console.error('删除标记推送云端失败:', error);
+        showToast('已在本机删除；推送云端失败，下次点「同步」会补上', '#ff9800', 5000);
+    }
+}
+
 // 同步本地数据到云端（按 uid 匹配：有则更新，无则新增）
 async function syncData() {
     /* ---- GitHub 存储：本地与云端合并后写回 ---- */
     if (IS_GITHUB_PAGES) {
         if (!await ensureGhToken()) return;
 
-        if (products.length + productMappings.length === 0) {
+        // 只剩墓碑也要同步：本机删空之后，「删除」这件事本身得推到云端
+        const localCount = products.length + productMappings.length +
+                           productTombstones.length + mappingTombstones.length;
+        if (localCount === 0) {
             alert('没有数据需要同步！');
             return;
         }
@@ -2093,23 +2300,12 @@ async function syncData() {
             const cloud = await ghLoad();
 
             // 商品按 uid 合并（同一条码的不同批次不再互相覆盖），映射按条码合并。
-            // 逐条比最后修改时间：本机改得更晚的推上去，云端更新的留在云端
-            const mergedProducts = mergeProductsByUid(cloud.products, products, true);
-            const mergedMappings = mergeMappingsByBarcode(cloud.mappings, productMappings, true);
+            // 逐条比最后修改时间：本机改得更晚的推上去，云端更新的留在云端，
+            // 墓碑同样参与比时间，删掉的东西不会被别的设备带回来
+            const result = await saveMergedToGithub(cloud, '同步商品数据');
 
-            await ghSave(mergedProducts, mergedMappings, '同步商品数据');
-
-            products = mergedProducts;
-            productMappings = mergedMappings;
-            saveProducts();
-            saveMappings();
-            updateProductList();
-            updateMappingList();
-            updateChart();
-            updateReminder();
-
-            showToast('同步完成：商品 ' + mergedProducts.length + ' 条', '#45a049', 5000);
-            alert('数据同步完成！\n商品: ' + mergedProducts.length + ' 条\n映射: ' + mergedMappings.length + ' 条');
+            showToast('同步完成：商品 ' + result.productCount + ' 条', '#45a049', 5000);
+            alert('数据同步完成！\n商品: ' + result.productCount + ' 条\n映射: ' + result.mappingCount + ' 条');
         } catch (error) {
             console.error('GitHub 同步失败:', error);
             showToast('同步失败：' + (error.message || '未知错误'), '#f44336', 5000);
@@ -2120,7 +2316,8 @@ async function syncData() {
 
     if (!await ensureCloud()) return;
 
-    const totalItems = products.length + productMappings.length;
+    const totalItems = products.length + productMappings.length +
+                       productTombstones.length + mappingTombstones.length;
     if (totalItems === 0) {
         alert('没有数据需要同步！');
         return;
@@ -2131,24 +2328,35 @@ async function syncData() {
     try {
         // 先把云端快照拉下来，逐条比最后修改时间再决定写什么：
         //   · 本机是旧副本时，云端更新的记录（例如别的设备刚标记的处置）不会被覆盖掉
-        //   · 本机改得更晚的记录照常推上去
+        //   · 本机改得更晚的记录照常推上去，删除标记也一样
         // 于是「先同步还是先获取」都不会丢数据，按钮顺序不再是坑
         const cloudProductDocs = await fetchAllFromCloud(PRODUCT_COLLECTION);
         const cloudMappingDocs = await fetchAllFromCloud(MAPPING_COLLECTION);
 
-        const mergedProducts = mergeProductsByUid(
-            cloudProductDocs.map(cloudDocToProduct), products, true);
-        const mergedMappings = mergeMappingsByBarcode(
-            cloudMappingDocs.map(cloudDocToMapping), productMappings, true);
+        const mergedProducts = mergeProducts(
+            cloudProductDocs.map(cloudDocToProduct), products, productTombstones, true);
+        const mergedMappings = mergeMappings(
+            cloudMappingDocs.map(cloudDocToMapping), productMappings, mappingTombstones, true);
 
-        const productResult = await upsertCollection(PRODUCT_COLLECTION, mergedProducts, cloudProductDocs);
-        const mappingResult = await upsertCollection(MAPPING_COLLECTION, mergedMappings, cloudMappingDocs);
+        // 墓碑跟着活记录一起写回同一个集合（就是带 deletedAt 的文档），
+        // 不用新建集合，也就不用再去 CloudBase 控制台开一次权限
+        const productResult = await upsertCollection(
+            PRODUCT_COLLECTION,
+            mergedProducts.products.concat(mergedProducts.tombstones),
+            cloudProductDocs);
+        const mappingResult = await upsertCollection(
+            MAPPING_COLLECTION,
+            mergedMappings.mappings.concat(mergedMappings.tombstones),
+            cloudMappingDocs);
 
         // 本机也收敛到合并结果：否则界面还显示旧状态，看着像同步没生效
-        products = mergedProducts;
-        productMappings = mergedMappings;
+        products = mergedProducts.products;
+        productTombstones = mergedProducts.tombstones;
+        productMappings = mergedMappings.mappings;
+        mappingTombstones = mergedMappings.tombstones;
         saveProducts();
         saveMappings();
+        saveTombstones();
         updateProductList();
         updateMappingList();
         updateChart();
@@ -2162,7 +2370,7 @@ async function syncData() {
             failCount === 0 ? '#45a049' : '#ff9800',
             5000
         );
-        alert('数据同步完成！\n商品: ' + mergedProducts.length + ' 条\n映射: ' + mergedMappings.length + ' 条\n' +
+        alert('数据同步完成！\n商品: ' + products.length + ' 条\n映射: ' + productMappings.length + ' 条\n' +
               '写入成功: ' + successCount + ' 项' + (failCount > 0 ? '\n失败: ' + failCount + ' 项' : ''));
     } catch (error) {
         console.error('数据同步失败:', error);
@@ -2179,8 +2387,8 @@ async function upsertCollection(collectionName, localItems, cloudSnapshot) {
     // 漏一个就会出现「同步后处置状态 / 修改时间丢了」
     const fields = isProduct
         ? ['uid', 'barcode', 'productName', 'type', 'scanDate', 'productionDate', 'shelfLife', 'shelfLifeUnit', 'validity',
-           'handledAction', 'handledAt', 'handledNote', 'updatedAt']
-        : ['barcode', 'productName', 'updatedAt'];
+           'handledAction', 'handledAt', 'handledNote', 'updatedAt', 'deletedAt']
+        : ['barcode', 'productName', 'updatedAt', 'deletedAt'];
 
     // 1. 云端已有记录，建立「匹配键 -> _id」映射。
     //    cloudSnapshot 是调用方刚拉过的快照，传了就直接用，不再多读一遍
@@ -2271,7 +2479,7 @@ async function upsertCollection(collectionName, localItems, cloudSnapshot) {
     return { success: success, fail: fail };
 }
 
-// 从云端获取最新数据（覆盖本地）
+// 从云端获取最新数据（与本地合并，谁新用谁）
 async function fetchLatestDataFromCloud() {
     /* ---- GitHub 存储 ---- */
     if (IS_GITHUB_PAGES) {
@@ -2282,24 +2490,32 @@ async function fetchLatestDataFromCloud() {
         try {
             const cloud = await ghLoad();
 
-            // 逐条比最后修改时间，谁新用谁：云端更新过的拉过来，本机刚改过的留着
-            const mergedProducts = mergeProductsByUid(cloud.products, products, false);
-            const mergedMappings = mergeMappingsByBarcode(cloud.mappings, productMappings, false);
-            const addedProducts = mergedProducts.length - products.length;
-            const addedMappings = mergedMappings.length - productMappings.length;
+            // 逐条比最后修改时间，谁新用谁：云端更新过的拉过来，本机刚改过的留着。
+            // 云端那份里的墓碑（别的设备删掉的）同样算数：
+            // 本机手里那条旧副本会在这里被删掉，而不是把云端已经删掉的记录又带回来
+            const mergedProducts = mergeProducts(cloud.products, products, productTombstones, false);
+            const mergedMappings = mergeMappings(cloud.mappings, productMappings, mappingTombstones, false);
+            const addedProducts = countOnlyIn(products, mergedProducts.products, 'uid');
+            const removedProducts = countOnlyIn(mergedProducts.products, products, 'uid');
+            const addedMappings = countOnlyIn(productMappings, mergedMappings.mappings, 'barcode');
+            const removedMappings = countOnlyIn(mergedMappings.mappings, productMappings, 'barcode');
 
-            products = mergedProducts;
-            productMappings = mergedMappings;
+            products = mergedProducts.products;
+            productTombstones = mergedProducts.tombstones;
+            productMappings = mergedMappings.mappings;
+            mappingTombstones = mergedMappings.tombstones;
             saveProducts();
             saveMappings();
+            saveTombstones();
             updateProductList();
             updateMappingList();
             updateChart();
             updateReminder();
 
-            showToast('获取完成：商品 ' + mergedProducts.length + ' 条', '#45a049', 5000);
-            alert('已与云端数据合并（两边谁更新用谁）！\n商品: ' + mergedProducts.length + ' 条（新增 ' + addedProducts + ' 条）\n' +
-                  '映射: ' + mergedMappings.length + ' 条（新增 ' + addedMappings + ' 条）');
+            showToast('获取完成：商品 ' + products.length + ' 条', '#45a049', 5000);
+            alert('已与云端数据合并（两边谁更新用谁）！\n' +
+                  '商品: ' + products.length + ' 条（新增 ' + addedProducts + '，删除 ' + removedProducts + '）\n' +
+                  '映射: ' + productMappings.length + ' 条（新增 ' + addedMappings + '，删除 ' + removedMappings + '）');
         } catch (error) {
             console.error('GitHub 获取数据失败:', error);
             showToast('获取失败：' + (error.message || '未知错误'), '#f44336', 5000);
@@ -2316,32 +2532,40 @@ async function fetchLatestDataFromCloud() {
         const cloudProductDocs = await fetchAllFromCloud(PRODUCT_COLLECTION);
         const cloudMappingDocs = await fetchAllFromCloud(MAPPING_COLLECTION);
 
-        // 逐条比最后修改时间，谁新用谁：云端更新过的拉过来，本机刚改过的留着
-        const mergedProducts = mergeProductsByUid(
-            cloudProductDocs.map(cloudDocToProduct), products, false);
-        const addedProducts = mergedProducts.length - products.length;
+        // 逐条比最后修改时间，谁新用谁：云端更新过的拉过来，本机刚改过的留着。
+        // 云端那份里的墓碑（别的设备删掉的）同样算数，本机的旧副本会被它删掉
+        const mergedProducts = mergeProducts(
+            cloudProductDocs.map(cloudDocToProduct), products, productTombstones, false);
+        const addedProducts = countOnlyIn(products, mergedProducts.products, 'uid');
+        const removedProducts = countOnlyIn(mergedProducts.products, products, 'uid');
 
-        products = mergedProducts;
+        products = mergedProducts.products;
+        productTombstones = mergedProducts.tombstones;
         saveProducts();
+        saveTombstones();
         updateProductList();
         updateChart();
         updateReminder();
 
-        const mergedMappings = mergeMappingsByBarcode(
-            cloudMappingDocs.map(cloudDocToMapping), productMappings, false);
-        const addedMappings = mergedMappings.length - productMappings.length;
+        const mergedMappings = mergeMappings(
+            cloudMappingDocs.map(cloudDocToMapping), productMappings, mappingTombstones, false);
+        const addedMappings = countOnlyIn(productMappings, mergedMappings.mappings, 'barcode');
+        const removedMappings = countOnlyIn(mergedMappings.mappings, productMappings, 'barcode');
 
-        productMappings = mergedMappings;
+        productMappings = mergedMappings.mappings;
+        mappingTombstones = mergedMappings.tombstones;
         saveMappings();
+        saveTombstones();
         updateMappingList();
 
         showToast(
-            '数据获取完成：商品 ' + mergedProducts.length + ' 条，映射 ' + mergedMappings.length + ' 条',
+            '数据获取完成：商品 ' + products.length + ' 条，映射 ' + productMappings.length + ' 条',
             '#45a049',
             5000
         );
-        alert('已与云端数据合并（两边谁更新用谁）！\n商品: ' + mergedProducts.length + ' 条（新增 ' + addedProducts + ' 条）\n' +
-              '映射: ' + mergedMappings.length + ' 条（新增 ' + addedMappings + ' 条）');
+        alert('已与云端数据合并（两边谁更新用谁）！\n' +
+              '商品: ' + products.length + ' 条（新增 ' + addedProducts + '，删除 ' + removedProducts + '）\n' +
+              '映射: ' + productMappings.length + ' 条（新增 ' + addedMappings + '，删除 ' + removedMappings + '）');
     } catch (error) {
         console.error('获取云端数据失败:', error);
         showToast('获取失败：' + (error.message || '未知错误'), '#f44336', 5000);
