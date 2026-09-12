@@ -57,9 +57,6 @@ let currentDisplayMode = 'all';
 let productSearchQuery = '';
 let mappingSearchQuery = '';
 
-// 图表实例
-let chart;
-
 // 摄像头扫码实例
 let html5QrCode = null;
 
@@ -646,12 +643,9 @@ function initializeApp() {
     // 加载数据
     loadData();
 
-    // 更新列表
+    // 更新列表（顶部概览条也跟着刷，见 updateProductList 末尾）
     updateProductList();
     updateMappingList();
-
-    // 初始化图表
-    initializeChart();
 
     // 打开页面就提醒已过期的商品（每天最多弹一次）
     alertExpiredOnce();
@@ -743,31 +737,83 @@ function bindEventListeners() {
     // 添加映射
     document.getElementById('addMappingBtn').addEventListener('click', addMapping);
 
-    // 商品列表搜索
-    document.getElementById('productSearchBtn').addEventListener('click', function() {
-        productSearchQuery = document.getElementById('productSearch').value;
+    // 商品列表搜索：输入即筛选
+    bindLiveSearch('productSearch', 'productClearSearchBtn', function(value) {
+        productSearchQuery = value.trim();
         updateProductList();
     });
 
-    // 商品列表清空搜索
-    document.getElementById('productClearSearchBtn').addEventListener('click', function() {
-        document.getElementById('productSearch').value = '';
-        productSearchQuery = '';
-        updateProductList();
-    });
-
-    // 映射列表搜索
-    document.getElementById('mappingSearchBtn').addEventListener('click', function() {
-        mappingSearchQuery = document.getElementById('mappingSearch').value;
+    // 映射列表搜索：输入即筛选
+    bindLiveSearch('mappingSearch', 'mappingClearSearchBtn', function(value) {
+        mappingSearchQuery = value.trim();
         updateMappingList();
     });
 
-    // 映射列表清空搜索
-    document.getElementById('mappingClearSearchBtn').addEventListener('click', function() {
-        document.getElementById('mappingSearch').value = '';
-        mappingSearchQuery = '';
-        updateMappingList();
+    // 「添加商品」标题栏：展开 / 收起
+    const addToggleBtn = document.getElementById('addToggleBtn');
+    if (addToggleBtn) {
+        addToggleBtn.addEventListener('click', function() {
+            const form = document.getElementById('productForm');
+            setAddFormOpen(!!form.hidden, true);
+        });
+    }
+}
+
+// 搜索框：输入即筛选，所以不再需要「搜索」按钮。
+// 200ms 防抖是给手机留的余量 —— 每敲一个字都会重建整张表，记录多时连着重绘会卡；
+// 回车则立即生效，不等防抖走完。
+function bindLiveSearch(inputId, clearBtnId, onQuery) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+
+    let timer = null;
+
+    input.addEventListener('input', function() {
+        clearTimeout(timer);
+        timer = setTimeout(function() { onQuery(input.value); }, 200);
     });
+
+    // 回车立刻筛，并取消防抖里那一次重复刷新
+    input.addEventListener('keydown', function(e) {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        clearTimeout(timer);
+        onQuery(input.value);
+    });
+
+    const clearBtn = document.getElementById(clearBtnId);
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            clearTimeout(timer);
+            input.value = '';
+            onQuery('');
+            input.focus();
+        });
+    }
+}
+
+// 展开 / 收起「添加商品」表单。
+// 默认收起：常驻的表单在手机上要占掉近一整屏，而每次打开页面想看的是商品列表。
+// focusBarcode 为 true 时才聚焦条码框并滚过去 —— 手机上键盘弹起来会盖住表单，
+// 所以「从列表点编辑」那条路径不聚焦（见 setEditMode）。
+function setAddFormOpen(open, focusBarcode) {
+    const section = document.getElementById('addSection');
+    const form = document.getElementById('productForm');
+    const btn = document.getElementById('addToggleBtn');
+    if (!form || !section) return;
+
+    form.hidden = !open;
+    section.classList.toggle('collapsed', !open);
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+
+    if (!open || !focusBarcode) return;
+
+    const barcodeInput = document.getElementById('barcode');
+    if (barcodeInput) barcodeInput.focus();
+
+    // 收起状态下标题栏就在列表下面，一般不用滚；block: 'nearest' 保证
+    // 已经在屏幕里时不会有任何跳动，真的在屏幕外才滚
+    section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 /* ===================== 5. 商品表单 ===================== */
@@ -846,7 +892,6 @@ function handleProductSubmit(e) {
 
     saveProducts();
     updateProductList();
-    updateChart();
     updateReminder();
 
     resetProductForm();
@@ -996,8 +1041,9 @@ function updateProductList() {
         emptyRow.innerHTML = '<td colspan="10" class="empty-tip">' + tip + '</td>';
         tbody.appendChild(emptyRow);
 
-        // 列表变了，顶部的到期提醒跟着刷新
+        // 列表变了，顶部的到期提醒和概览条跟着刷新
         updateReminder();
+        updateStatsStrip();
         return;
     }
 
@@ -1074,8 +1120,9 @@ function updateProductList() {
         tbody.appendChild(row);
     });
 
-    // 列表变了，顶部的到期提醒跟着刷新
+    // 列表变了，顶部的到期提醒和概览条跟着刷新
     updateReminder();
+    updateStatsStrip();
 }
 
 // 两个筛选按钮（临期筛选 / 显示已处理）互斥，文案和配色统一在这里同步
@@ -1357,6 +1404,10 @@ function setEditMode(editingId) {
 
     const cancelBtn = document.getElementById('cancelEditBtn');
     if (cancelBtn) cancelBtn.style.display = editingId ? 'inline-block' : 'none';
+
+    // 表单默认收起：从列表点「编辑」时要把它展开，否则字段被填进一个看不见的表单，
+    // 用户只看到列表毫无变化，会以为点坏了（editProduct 里已经负责滚过去）
+    if (editingId) setAddFormOpen(true, false);
 }
 
 // 取消编辑：把表单和编辑状态清干净（点过「编辑」之后原来是没有退路的）
@@ -1391,7 +1442,6 @@ window.deleteProduct = function(id) {
     saveProducts();
     saveTombstones();
     updateProductList();
-    updateChart();
     updateReminder();
 
     // 墓碑立刻推到云端，别的设备下次「获取最新数据」就能看到这条没了。
@@ -1458,7 +1508,6 @@ window.confirmHandle = function() {
 
     saveProducts();
     updateProductList();
-    updateChart();
     updateReminder();
 
     showToast('已标记为「' + product.handledAction + '」，原始记录保留', '#4CAF50');
@@ -1485,7 +1534,6 @@ window.undoHandle = function(id) {
 
     saveProducts();
     updateProductList();
-    updateChart();
     updateReminder();
 
     showToast('已撤销处理标记，商品回到待处理列表', '#2196F3');
@@ -1820,7 +1868,6 @@ function importFromCSV(e) {
         saveMappings();
         updateProductList();
         updateMappingList();
-        updateChart();
 
         alert('成功导入 ' + productCount + ' 条商品记录和 ' + mappingCount + ' 条映射记录！');
     };
@@ -1847,79 +1894,47 @@ function clearAllData() {
     saveTombstones();
     updateProductList();
     updateMappingList();
-    updateChart();
     alert('所有数据已清空！');
 }
 
-/* ===================== 9. 图表 ===================== */
-// 初始化图表
-function initializeChart() {
-    const ctx = document.getElementById('expiryChart').getContext('2d');
-    chart = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: ['正常', '1-3个月', '1个月内', '已过期'],
-            datasets: [{
-                label: '商品数量',
-                data: getExpiryCounts(),
-                backgroundColor: [
-                    'rgba(76, 175, 80, 0.6)',
-                    'rgba(255, 152, 0, 0.6)',
-                    'rgba(244, 67, 54, 0.6)',
-                    'rgba(158, 158, 158, 0.6)'
-                ],
-                borderColor: [
-                    'rgba(76, 175, 80, 1)',
-                    'rgba(255, 152, 0, 1)',
-                    'rgba(244, 67, 54, 1)',
-                    'rgba(158, 158, 158, 1)'
-                ],
-                borderWidth: 1
-            }]
-        },
-        options: {
-            responsive: true,
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    ticks: { precision: 0 }
-                }
-            },
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            return `商品数量: ${context.raw}`;
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
+/* ===================== 9. 数据概览 ===================== */
+// 这里原来是一张 Chart.js 柱状图（正常 / 1-3个月 / 1个月内 / 已过期 四根柱子），改成一行小标签。
+// 删掉图表的理由：
+//   1. 它占 300~400px（手机上正好一整屏），却只画了 4 个数，其中「已过期 / 30 天内」
+//      顶部横幅里写得更清楚（还带商品名和「只看这些」）；
+//   2. 它排除了已处理和未填有效期的记录，柱子加起来和列表行数对不上，反而让人犯嘀咕；
+//   3. 顺带省掉 205KB 的 chart.umd.js。
+// 换成一行标签后同样一眼看完，高度只剩二十几像素，而且数字能和列表对上。
+function updateStatsStrip() {
+    const strip = document.getElementById('statsStrip');
+    if (!strip) return;
 
-// 获取到期数量统计
-function getExpiryCounts() {
     const counts = { normal: 0, warning: 0, danger: 0, expired: 0, unknown: 0 };
+    let handled = 0;
 
     products.forEach(function(product) {
-        if (isHandled(product)) return;   // 已处理的商品不再计入图表
-
-        const status = getExpiryStatus(product.validity);
-        if (counts[status] === undefined) return;   // 未填有效期的记录不进图表
-        counts[status]++;
+        if (isHandled(product)) {
+            handled++;   // 已处理的不算进到期统计，但单独显示一个数
+            return;
+        }
+        counts[getExpiryStatus(product.validity)]++;
     });
 
-    return [counts.normal, counts.warning, counts.danger, counts.expired];
-}
+    // 数量为 0 的标签不显示 —— 一行里塞满空标签只会更难读
+    const chips = [
+        ['normal', '正常', counts.normal],
+        ['warning', '1-3个月', counts.warning],
+        ['danger', '30天内', counts.danger],
+        ['expired', '已过期', counts.expired],
+        ['unknown', '未填有效期', counts.unknown],
+        ['handled', '已处理', handled]
+    ].filter(function(item) {
+        return item[2] > 0;
+    }).map(function(item) {
+        return '<span class="stat-chip stat-' + item[0] + '">' + item[1] + ' ' + item[2] + '</span>';
+    }).join('');
 
-// 更新图表
-function updateChart() {
-    if (chart) {
-        chart.data.datasets[0].data = getExpiryCounts();
-        chart.update();
-    }
+    strip.innerHTML = '<span class="stat-total">共 ' + products.length + ' 条</span>' + chips;
 }
 
 // 加载数据
@@ -2252,7 +2267,6 @@ async function saveMergedToGithub(cloud, message) {
     saveTombstones();
     updateProductList();
     updateMappingList();
-    updateChart();
     updateReminder();
 
     return { productCount: products.length, mappingCount: productMappings.length };
@@ -2359,7 +2373,6 @@ async function syncData() {
         saveTombstones();
         updateProductList();
         updateMappingList();
-        updateChart();
         updateReminder();
 
         const successCount = productResult.success + mappingResult.success;
@@ -2509,7 +2522,6 @@ async function fetchLatestDataFromCloud() {
             saveTombstones();
             updateProductList();
             updateMappingList();
-            updateChart();
             updateReminder();
 
             showToast('获取完成：商品 ' + products.length + ' 条', '#45a049', 5000);
@@ -2544,7 +2556,6 @@ async function fetchLatestDataFromCloud() {
         saveProducts();
         saveTombstones();
         updateProductList();
-        updateChart();
         updateReminder();
 
         const mergedMappings = mergeMappings(

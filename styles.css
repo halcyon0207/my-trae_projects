@@ -30,12 +30,64 @@ header h1 {
     font-weight: 600;
 }
 
+/* 添加商品：收起时整块只剩标题栏那一条，所以内边距挪给内部的 form，
+   否则收起状态下还会凭空多出 40px 空白 */
 .form-section {
     background-color: white;
     margin-bottom: 20px;
-    padding: 20px;
+    padding: 0;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* 展开后由表单自己留内边距 */
+#productForm {
+    padding: 20px;
+}
+
+/* form 带 hidden 属性时要真的藏起来。CSS 里没有给 form 设 display，
+   正常不会打架，这条是防止以后加了 display 规则把 hidden 盖掉 */
+#productForm[hidden] {
+    display: none;
+}
+
+/* 「添加商品」标题栏：样式和「商品列表」「条码-名称映射管理」的绿条保持一致，
+   点一下展开 / 收起 */
+.section-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 15px;
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 8px 8px 0 0;
+    font-family: inherit;
+    font-size: 1.3rem;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+
+.section-toggle:hover {
+    background-color: #45a049;
+}
+
+/* 收起时下方没有内容，四个角都收圆，否则底部会露出两个直角 */
+.form-section.collapsed .section-toggle {
+    border-radius: 8px;
+}
+
+.toggle-mark {
+    font-size: 0.9rem;
+    transition: transform 0.2s;
+}
+
+/* 展开时箭头翻过来朝上 */
+#addSection:not(.collapsed) .toggle-mark {
+    transform: rotate(180deg);
 }
 
 section h2 {
@@ -186,17 +238,42 @@ input:focus {
     margin-bottom: 0;
 }
 
-/* 图表区域 */
-.chart-section {
-    height: 400px;
-    margin-bottom: 40px;
-    position: relative;
-    z-index: 1;
+/* 数据概览：替代原来的柱状图。高度从 400px 降到二十几像素，
+   「一眼看完」的效果没变，而且这里的数字和列表行数是对得上的
+   （柱状图会排除已处理和未填有效期的记录，柱子加起来和列表对不上） */
+.stats-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 20px;
+    padding: 10px 15px;
     background-color: white;
-    padding: 20px;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    font-size: 13px;
 }
+
+.stat-total {
+    font-weight: 600;
+    color: #333;
+}
+
+/* 小标签：底色跟状态列保持一致，扫一眼颜色就知道哪类多 */
+.stat-chip {
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.stat-normal  { background-color: #e8f5e9; color: #2e7d32; }
+.stat-warning { background-color: #fff3e0; color: #e65100; }
+.stat-danger  { background-color: #ffebee; color: #c62828; }
+.stat-expired { background-color: #eceff1; color: #546e7a; }
+.stat-unknown { background-color: #f5f5f5; color: #757575; }
+.stat-handled { background-color: #eceff1; color: #607d8b; }
 
 /* 表格样式 */
 /* 重新设计列表结构，将固定元素放在滚动区域外 */
@@ -210,6 +287,12 @@ input:focus {
     position: relative;
     z-index: 2;
     padding-top: 0;
+}
+
+/* 列表现在紧跟在概览条下面（概览条自己带了 20px 下间距），40px 的上间距会显得空。
+   手机端那条 20px 的规则写在文件后面，优先级相同、以后者为准，所以手机上仍是 20px */
+.list-section {
+    margin-top: 0;
 }
 
 /* 列表标题 */
@@ -239,13 +322,18 @@ input:focus {
     z-index: 5;
 }
 
-/* 商品列表的搜索区挪到了明细下方，分隔线与阴影要跟着翻过来，
-   否则会在表格和搜索框之间凭空多出一条线、底边反而没有分隔 */
-.list-section .search-controls {
-    border-top: 1px solid #eee;
-    border-bottom: none;
-    box-shadow: 0 -2px 2px rgba(0,0,0,0.05);
-    margin-bottom: 0;
+/* 列表上方的视图控制（筛选 / 显示已处理）：和下面的搜索区属于同一块工具栏，
+   所以只留上内边距、不加下边框，让两行看起来是一整块 */
+.list-section .list-view-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 15px 15px 0;
+    background-color: white;
+}
+
+.list-view-controls .btn {
+    margin: 0;
 }
 
 /* 滚动内容区域 */
@@ -358,15 +446,25 @@ td .btn {
     font-size: 14px;
 }
 
-/* 确保搜索控件在响应式布局下正常显示 */
+/* 搜索控件：手机上同样收成一行 —— 输入框吃掉剩余宽度，「清空」按内容宽。
+   以前这里是把 flex 方向改成 column，再加上后面的 .btn { width: 100% }，
+   三个控件会各占一整行，白白吃掉大半屏 */
 @media (max-width: 768px) {
     .search-controls {
-        flex-direction: column;
+        gap: 8px;
     }
-    
+
     .search-controls input {
-        width: 100%;
-        min-width: auto;
+        width: auto;
+        flex: 1;
+        min-width: 0;   /* 少了这个，flex 项不会缩到比内容更窄，输入框会把按钮挤出屏幕 */
+    }
+
+    .search-controls .btn {
+        width: auto;
+        flex-shrink: 0;
+        margin: 0;
+        padding: 14px 12px;
     }
 }
 
@@ -613,21 +711,22 @@ td .btn {
         margin-right: 0;
     }
 
-    /* 列表下方的搜索区：输入框独占一行、「搜索」「清空」并排。
-       不这么写的话三个控件会各自铺满一整行，白白占掉大半屏 */
-    .list-section .search-controls {
+    /* 视图控制的两个按钮在手机上并排等宽：文案本来就是短句，两列放得下。
+       选择器带 .list-section 是为了压过上面那条基础规则（同样是两个类的权重，
+       写在这里更靠后，所以以这条为准） */
+    .list-section .list-view-controls {
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 8px;
+        padding: 12px 12px 0;
     }
 
-    .list-section .search-controls input {
-        grid-column: 1 / -1;
-    }
-
-    .list-section .search-controls .btn {
+    .list-view-controls .btn {
         width: 100%;
         margin: 0;
+        padding: 12px 8px;
+        font-size: 13px;
+        white-space: normal;   /* 「筛选1个月内到期商品」偏长，允许折成两行而不是溢出 */
     }
 
     .status {
@@ -643,10 +742,16 @@ td .btn {
         -webkit-overflow-scrolling: touch;
     }
 
-    .chart-section {
-        height: 300px;
-        padding: 12px;
-        margin-bottom: 20px;
+    /* 数据区在手机上两列并排：6 个按钮从 6 行压成 3 行 */
+    .data-controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+    }
+
+    .data-controls .btn {
+        width: 100%;
+        margin: 0;
     }
 
     .list-section,

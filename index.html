@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>商品到期提醒系统</title>
     <link rel="stylesheet" href="styles.css">
-    <!-- 图表库、扫码库都放在本地，避免国内访问 CDN 不稳定甚至加载不出来 -->
-    <script src="chart.umd.js"></script>
+    <!-- 扫码库放在本地，避免国内访问 CDN 不稳定甚至加载不出来。
+         图表已改成一行统计标签，不再需要 Chart.js（顺带省下 205KB） -->
     <script src="html5-qrcode.min.js"></script>
     <!-- CloudBase SDK 体积较大且只在腾讯云模式用到，改为需要时再动态加载（见 script.js） -->
 </head>
@@ -20,10 +20,61 @@
             <!-- 到期提醒横幅（有临期 / 过期商品时由 script.js 显示出来） -->
             <section id="reminderBanner" class="reminder-banner" style="display: none;"></section>
 
-            <!-- 商品输入表单 -->
-            <section class="form-section">
-                <h2>添加商品</h2>
-                <form id="productForm">
+            <!-- 数据概览：一行小标签，替代原来那张 300~400px 高的柱状图 -->
+            <div id="statsStrip" class="stats-strip"></div>
+
+            <!-- 商品列表：每次打开页面主要就是看它，所以放在最前面 -->
+            <section class="list-section">
+                <h2>商品列表</h2>
+
+                <!-- 视图控制：以前和「清空 / 同步 / 获取」挤在一排，手机上 5 个按钮各占一行，
+                         把列表顶到了第二屏。它们本质是列表的显示方式，跟着列表走更合理 -->
+                <div class="list-view-controls">
+                    <button id="filterBtn" class="btn btn-warning">筛选1个月内到期商品</button>
+                    <button id="handledFilterBtn" class="btn btn-secondary">显示已处理</button>
+                </div>
+
+                <!-- 搜索：输入即筛选，所以不需要「搜索」按钮，输入框和「清空」收成一行 -->
+                <div class="search-controls">
+                    <input type="text" id="productSearch" placeholder="搜索名称或条码">
+                    <button id="productClearSearchBtn" class="btn btn-secondary">清空</button>
+                </div>
+
+                <div class="scrollable-content">
+                    <table id="productTable">
+                        <thead>
+                            <tr>
+                                <!-- 操作放在最左边：手机上打开列表第一眼就能点到按钮，不用横向滑到最右。
+                                     改这里的顺序时，script.js 里 renderProducts 的单元格顺序要一起改 -->
+                                <th>操作</th>
+                                <th>序号</th>
+                                <th>有效期</th>
+                                <th>状态</th>
+                                <th>名称</th>
+                                <th>类型</th>
+                                <th>扫描日期</th>
+                                <th>生产日期</th>
+                                <th>保质期</th>
+                                <th>条码</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- 商品数据将通过JavaScript动态添加 -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- 添加商品：默认收起成一行标题栏，点开才展开表单。
+                 添加是低频动作，常驻的表单在手机上要占掉近一整屏，
+                 而每次打开页面真正想看的是上面的商品列表 -->
+            <section class="form-section collapsed" id="addSection">
+                <button type="button" id="addToggleBtn" class="section-toggle"
+                        aria-expanded="false" aria-controls="productForm">
+                    <span>添加商品</span>
+                    <span class="toggle-mark" aria-hidden="true">▾</span>
+                </button>
+                <form id="productForm" hidden>
                     <div class="form-group">
                         <label for="barcode">商品条码:</label>
                         <div class="barcode-input-wrapper">
@@ -64,61 +115,12 @@
                 </form>
             </section>
 
-            <!-- 功能按钮 -->
-            <section class="controls">
-                <button id="clearBtn" class="btn btn-danger">清空所有数据</button>
-                <button id="syncBtn" class="btn btn-info">同步数据</button>
-                <button id="fetchBtn" class="btn btn-success">获取最新数据</button>
-                <button id="filterBtn" class="btn btn-warning">筛选1个月内到期商品</button>
-                <button id="handledFilterBtn" class="btn btn-secondary">显示已处理</button>
-            </section>
-
-            <!-- 图表展示 -->
-            <section class="chart-section">
-                <h2>到期日期分布</h2>
-                <canvas id="expiryChart"></canvas>
-            </section>
-
-            <!-- 商品列表 -->
-            <section class="list-section">
-                <h2>商品列表</h2>
-                <div class="scrollable-content">
-                    <table id="productTable">
-                        <thead>
-                            <tr>
-                                <!-- 操作放在最左边：手机上打开列表第一眼就能点到按钮，不用横向滑到最右。
-                                     改这里的顺序时，script.js 里 renderProducts 的单元格顺序要一起改 -->
-                                <th>操作</th>
-                                <th>序号</th>
-                                <th>有效期</th>
-                                <th>状态</th>
-                                <th>名称</th>
-                                <th>类型</th>
-                                <th>扫描日期</th>
-                                <th>生产日期</th>
-                                <th>保质期</th>
-                                <th>条码</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <!-- 商品数据将通过JavaScript动态添加 -->
-                        </tbody>
-                    </table>
-                </div>
-                <!-- 搜索区放在明细下方：手机上先看到商品，往下滑才看到搜索框 -->
-                <div class="search-controls">
-                    <input type="text" id="productSearch" placeholder="搜索商品名称或条码">
-                    <button id="productSearchBtn" class="btn btn-secondary">搜索</button>
-                    <button id="productClearSearchBtn" class="btn btn-secondary">清空</button>
-                </div>
-            </section>
-
             <!-- 商品条码映射管理 -->
             <section class="mapping-section">
                 <h2>条码-名称映射管理</h2>
+                <!-- 和商品列表一样：输入即筛选，输入框和「清空」占一行 -->
                 <div class="search-controls">
-                    <input type="text" id="mappingSearch" placeholder="搜索商品名称或条码">
-                    <button id="mappingSearchBtn" class="btn btn-secondary">搜索</button>
+                    <input type="text" id="mappingSearch" placeholder="搜索名称或条码">
                     <button id="mappingClearSearchBtn" class="btn btn-secondary">清空</button>
                 </div>
                 <div class="mapping-controls">
@@ -143,11 +145,15 @@
                 </div>
             </section>
 
-            <!-- 数据导入导出：放页面最下面，离上面的列表远一点，减少误触 -->
+            <!-- 数据区：同步 / 获取 / 导入导出 / 清空，都是「整份数据」层面的操作，集中放最下面。
+                 「清空」是破坏性操作，离列表远一点，免得手滑误触 -->
             <section class="controls data-controls">
+                <button id="syncBtn" class="btn btn-info">同步数据</button>
+                <button id="fetchBtn" class="btn btn-success">获取最新数据</button>
                 <button id="exportBtn" class="btn btn-secondary">导出CSV</button>
                 <input type="file" id="importFile" accept=".csv" style="display: none;">
                 <button id="importBtn" class="btn btn-secondary">导入CSV</button>
+                <button id="clearBtn" class="btn btn-danger">清空所有数据</button>
             </section>
         </main>
     </div>
