@@ -302,6 +302,14 @@ tr:hover {
     background-color: #fafafa;
 }
 
+/* 商品列表的行底色被后面的「#productTable tbody tr」定死了（操作列要 inherit 跟住行色），
+   那条规则比上面这条 tr:hover 更具体，会把悬停效果盖掉，这里补回来。
+   位置很关键：它和下面的 .row-expired / .row-danger / .row-handled 同权重（都是 1,1,2），
+   靠源码先后分胜负 —— 必须写在那几行之前，过期红/临期黄/已处理灰才能继续赢过悬停 */
+#productTable tbody tr:hover {
+    background-color: #fafafa;
+}
+
 /* 紧凑的按钮样式 */
 td .btn {
     padding: 3px 6px;
@@ -524,6 +532,38 @@ td .btn {
         padding: 6px 2px;
         font-size: 13px;
     }
+}
+
+/* ===== 操作列横向吸附：左右滑动时它不动，只有序号往后的列在走 ===== */
+/* 吸附相对的是 .scrollable-content —— sticky 自动找最近的滚动容器，而它正是
+   overflow-x:auto 的那个，所以表格这边不用再加东西。
+   :not([colspan]) 是为了放过「列表为空」那一行：它只有一个跨 10 列的格子，
+   也命中 :first-child，不加限制就会在提示文字右边凭空多画一条竖线 */
+#productTable th:first-child,
+#productTable td:first-child:not([colspan]) {
+    position: sticky;
+    left: 0;
+    /* 分隔线用 box-shadow 而不是 border：sticky 格子的边框会留在原地不跟着走
+       （border-collapse 时边框归整张表绘制），阴影才会跟格子一起吸附。
+       td 本身只有下边框、没有竖线，这一条正好当冻结列的分界 */
+    box-shadow: 1px 0 0 #e0e0e0;
+}
+
+/* 吸附格子必须是不透明底，否则右滑过来的列会从它下面透出来。
+   行是透明的（只有过期/临期/已处理那几行才有底色），所以这里先给每行一个白底，
+   第一列再用 inherit 跟住 —— 那几行的红/黄/灰会连着第一格一起变，不会只变半行 */
+#productTable tbody tr {
+    background-color: #fff;
+}
+
+#productTable th:first-child {
+    z-index: 2;                  /* 表头第一格要压住数据行的第一格 */
+    background-color: #f8f8f8;   /* 和 th 的底色保持一致，否则数据行会从它下面透出来 */
+}
+
+#productTable td:first-child:not([colspan]) {
+    z-index: 1;                  /* 压住右滑过来的那些列；表头是 20，仍在它上面 */
+    background-color: inherit;
 }
 
 /* ===== 手机端增强（触屏操作友好） ===== */
