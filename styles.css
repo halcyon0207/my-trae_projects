@@ -62,6 +62,22 @@ section h2 {
     min-width: 200px;
 }
 
+/* 保质期 = 数量 + 单位 */
+.shelf-life-wrapper {
+    display: flex;
+    gap: 8px;
+}
+
+.shelf-life-wrapper input {
+    flex: 1;
+    min-width: 0;
+}
+
+.shelf-life-wrapper select {
+    width: 96px;
+    flex-shrink: 0;
+}
+
 label {
     display: block;
     margin-bottom: 5px;
@@ -71,12 +87,15 @@ label {
 
 input[type="text"],
 input[type="number"],
-input[type="date"] {
+input[type="date"],
+select {
     width: 100%;
     padding: 10px;
     border: 1px solid #ddd;
     border-radius: 4px;
     font-size: 14px;
+    background-color: #fff;
+    color: #333;
 }
 
 input:focus {
@@ -132,6 +151,25 @@ input:focus {
 
 .btn-info:hover {
     background-color: #e68900;
+}
+
+/* JS 里用到了 btn-warning / btn-success，补上样式 */
+.btn-warning {
+    background-color: #ff9800;
+    color: white;
+}
+
+.btn-warning:hover {
+    background-color: #e68900;
+}
+
+.btn-success {
+    background-color: #4CAF50;
+    color: white;
+}
+
+.btn-success:hover {
+    background-color: #45a049;
 }
 
 /* 控制按钮区域 */
@@ -338,6 +376,11 @@ td .btn {
     color: white;
 }
 
+.status-unknown {
+    background-color: #bdbdbd;
+    color: #424242;
+}
+
 /* 响应式设计 */
 @media (max-width: 768px) {
     .container {
@@ -487,18 +530,50 @@ td .btn {
 
 .scanner-content #reader {
     width: 100%;
-    margin-bottom: 15px;
-    min-height: 250px;
+    margin-bottom: 10px;
+    min-height: 150px;
+    background-color: #000;
+    border-radius: 8px;
+    overflow: hidden;
 }
 
 .scanner-content #reader video {
     width: 100%;
+    display: block;
     border-radius: 8px;
+}
+
+.scanner-hint {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: #666;
+    line-height: 1.5;
+}
+
+.scanner-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
 }
 
 /* 小屏适配 */
 @media (max-width: 480px) {
+    /* 手机上让取景框铺满屏幕。解码用的画布就是这块预览区域，
+       越宽条码占的像素越多，识别得越快越准 */
+    .scanner-modal {
+        padding: 0;
+        align-items: flex-start;
+    }
+
     .scanner-content {
-        padding: 15px;
+        padding: 12px;
+        max-width: 100%;
+        min-height: 100vh;
+        border-radius: 0;
+        box-sizing: border-box;
+    }
+
+    .scanner-hint {
+        font-size: 13px;
     }
 }
