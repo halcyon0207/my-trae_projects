@@ -812,6 +812,7 @@ function buildProductFromForm(formData, shelfLifeUnit) {
         shelfLife: formData.get('shelfLife'),
         shelfLifeUnit: shelfLifeUnit,
         validity: formData.get('validity'),
+        updatedAt: new Date().toISOString(),   // 合并时判新旧用；新记录这就是它的第一次修改
         createdAt: new Date().toISOString()
     };
 }
@@ -1459,6 +1460,7 @@ window.confirmHandle = function() {
     product.handledAction = actionEl ? actionEl.value : HANDLE_ACTIONS[0];
     product.handledNote = noteEl ? noteEl.value.trim() : '';
     product.handledAt = todayLocal();
+    touchRecord(product);   // 打了这个时间戳，别的设备才知道这条比它手里的新
 
     closeHandleDialog();
 
@@ -1486,6 +1488,8 @@ window.undoHandle = function(id) {
     product.handledAction = '';
     product.handledNote = '';
     product.handledAt = '';
+    // 撤销同样要打时间戳，否则别处那份「已处理」会被判成更新，撤销推不过去
+    touchRecord(product);
 
     saveProducts();
     updateProductList();
@@ -1516,7 +1520,8 @@ function addMapping() {
             const oldBarcode = productMappings[mappingIndex].barcode;
             productMappings[mappingIndex] = Object.assign({}, productMappings[mappingIndex], {
                 barcode: barcode,
-                productName: productName
+                productName: productName,
+                updatedAt: new Date().toISOString()
             });
 
             // 如果条码发生变化，需要更新商品列表中所有使用旧条码的商品名称
@@ -1544,13 +1549,15 @@ function addMapping() {
         if (existingIndex >= 0) {
             // 更新现有映射
             productMappings[existingIndex].productName = productName;
+            touchRecord(productMappings[existingIndex]);
             syncProductNames(barcode, productName);
         } else {
             // 添加新映射
             productMappings.push({
                 id: Date.now(),
                 barcode: barcode,
-                productName: productName
+                productName: productName,
+                updatedAt: new Date().toISOString()
             });
         }
 
@@ -1569,6 +1576,7 @@ function syncProductNames(barcode, newName) {
     products.forEach(function(product) {
         if (product.barcode === barcode) {
             product.productName = newName;
+            touchRecord(product);   // 改名也是一次修改，别的设备要能收到
         }
     });
     saveProducts();
@@ -1782,6 +1790,7 @@ function importFromCSV(e) {
                     handledAction: handledAction,
                     handledAt: handledAt,
                     handledNote: (row[10] || '').trim(),
+                    updatedAt: new Date().toISOString(),   // 导入 = 本机此刻改过，合并时按它算新旧
                     createdAt: new Date().toISOString()
                 });
                 productCount++;
@@ -1789,7 +1798,8 @@ function importFromCSV(e) {
                 const mapping = {
                     id: Date.now() + i + 1000,   // 确保ID与商品不冲突
                     barcode: barcode,
-                    productName: productName
+                    productName: productName,
+                    updatedAt: new Date().toISOString()
                 };
                 const existingIndex = productMappings.findIndex(function(m) { return m.barcode === barcode; });
                 if (existingIndex >= 0) {
@@ -1947,34 +1957,122 @@ function buildUidIndex(list) {
     return index;
 }
 
-// 按 uid 合并两份商品列表；同一条记录冲突时本地优先（与原有行为一致）
-function mergeProductsByUid(cloudList, localList) {
+/* ---- 记录的最后修改时间：跨设备同步靠它判断「哪份更新」 ---- */
+// 记录被改动时打一次时间戳。新增、编辑、标记处置、撤销处置、改名、导入都要调。
+function touchRecord(record) {
+    if (record) record.updatedAt = new Date().toISOString();
+    return record;
+}
+
+// 取记录的最后修改时间（毫秒）。没有 updatedAt 的老记录用 handledAt 兜底：
+// 标记过处置的老记录，至少是在那一天之后才变成现在这样的；从没被动过的算 0。
+//
+// 这条兜底不能省 —— 存量数据全是老格式，少了它老记录之间就没法比新旧，
+// 只能退回「一边通吃」，又回到「换设备看不到已处理」那个坑里。
+function recordModifiedTime(record) {
+    if (!record) return 0;
+
+    const updated = Date.parse(record.updatedAt);
+    if (!isNaN(updated)) return updated;
+
+    const handled = Date.parse(record.handledAt);
+    return isNaN(handled) ? 0 : handled;
+}
+
+// 同一条记录两边都有时，取最后修改时间更晚的那条。
+// 只有时间完全相同（或两边都取不到时间）才用 preferLocal 决定：
+//   preferLocal = true  → 同步（推送）方向：本机优先
+//   preferLocal = false → 获取最新数据（拉取）方向：云端优先
+function pickNewerRecord(cloudRecord, localRecord, preferLocal) {
+    const cloudTime = recordModifiedTime(cloudRecord);
+    const localTime = recordModifiedTime(localRecord);
+
+    if (cloudTime === localTime) return preferLocal ? localRecord : cloudRecord;
+    return cloudTime > localTime ? cloudRecord : localRecord;
+}
+
+// 按 uid 合并两份商品列表。
+//
+// 同 uid 的冲突不再是「一边通吃」，而是逐条比最后修改时间，谁新用谁：
+//   · 本机是旧副本时，盖不掉云端的新状态（例如别的设备刚标记的处置）
+//   · 本机刚改过的记录，照样能推上去
+// 于是推送和拉取两个方向都不会丢数据，先点哪个按钮都不影响结果。
+// preferLocal 只在时间打平时起作用（两边都没改过、内容却不一样）。
+function mergeProductsByUid(cloudList, localList, preferLocal) {
     // 必须先给本地记录补齐 uid，再按指纹建索引。
     // 否则本地记录恰好都没 uid 时，云端的老记录匹配不到、会被当成新记录重复插入。
     const localWithUid = ensureProductUids(localList, null);
     const uidIndex = buildUidIndex(localWithUid);
-    const map = new Map();
+    const cloudWithUid = ensureProductUids(cloudList, uidIndex);
 
-    ensureProductUids(cloudList, uidIndex).forEach(function(product) {
+    // 云端那份先铺底，输出顺序就稳定，同步前后列表不会莫名重排
+    const map = new Map();
+    cloudWithUid.forEach(function(product) {
         map.set(String(product.uid), product);
     });
+
     localWithUid.forEach(function(product) {
-        map.set(String(product.uid), product);
+        const key = String(product.uid);
+        const cloudRecord = map.get(key);
+        // 只在本机存在、云端没有的记录，走下面这行原样留下
+        map.set(key, cloudRecord ? pickNewerRecord(cloudRecord, product, preferLocal) : product);
     });
 
     return Array.from(map.values());
 }
 
-// 映射按条码合并：一个条码本来就只该对应一个名称，这里特意不用 uid
-function mergeMappingsByBarcode(cloudList, localList) {
+// 映射按条码合并：一个条码本来就只该对应一个名称，这里特意不用 uid。
+// 冲突判定与 mergeProductsByUid 一致：先比修改时间，打平才看 preferLocal
+function mergeMappingsByBarcode(cloudList, localList, preferLocal) {
     const map = new Map();
+
     (cloudList || []).forEach(function(mapping) {
         if (mapping && mapping.barcode) map.set(String(mapping.barcode), mapping);
     });
+
     (localList || []).forEach(function(mapping) {
-        if (mapping && mapping.barcode) map.set(String(mapping.barcode), mapping);
+        if (!mapping || !mapping.barcode) return;
+
+        const key = String(mapping.barcode);
+        const cloudRecord = map.get(key);
+        map.set(key, cloudRecord ? pickNewerRecord(cloudRecord, mapping, preferLocal) : mapping);
     });
+
     return Array.from(map.values());
+}
+
+/* ---- 云端文档 → 本地记录 ---- */
+// 字段清单必须和 upsertCollection 的白名单一致，
+// 漏一个就会出现「同步后处置状态 / 修改时间丢了」
+function cloudDocToProduct(doc) {
+    return {
+        id: doc.uid || doc._id,      // 兼容旧字段
+        uid: doc.uid || '',          // 空 uid 会在合并时补上，下次同步回填云端
+        barcode: doc.barcode,
+        productName: doc.productName,
+        type: doc.type || '商品',
+        scanDate: doc.scanDate || '',
+        productionDate: doc.productionDate || '',
+        shelfLife: doc.shelfLife || '',
+        shelfLifeUnit: doc.shelfLifeUnit || '月',
+        validity: doc.validity || '',
+        handledAction: doc.handledAction || '',
+        handledAt: doc.handledAt || '',
+        handledNote: doc.handledNote || '',
+        updatedAt: doc.updatedAt || '',   // 缺了它就只能退回 handledAt 兜底
+        createdAt: doc._createTime
+            ? new Date(doc._createTime).toISOString()
+            : new Date().toISOString()
+    };
+}
+
+function cloudDocToMapping(doc) {
+    return {
+        id: doc._id,
+        barcode: doc.barcode,
+        productName: doc.productName,
+        updatedAt: doc.updatedAt || ''
+    };
 }
 
 /* ===================== 10. 云端同步 ===================== */
@@ -1994,9 +2092,10 @@ async function syncData() {
         try {
             const cloud = await ghLoad();
 
-            // 商品按 uid 合并（同一条码的不同批次不再互相覆盖），映射仍按条码合并
-            const mergedProducts = mergeProductsByUid(cloud.products, products);
-            const mergedMappings = mergeMappingsByBarcode(cloud.mappings, productMappings);
+            // 商品按 uid 合并（同一条码的不同批次不再互相覆盖），映射按条码合并。
+            // 逐条比最后修改时间：本机改得更晚的推上去，云端更新的留在云端
+            const mergedProducts = mergeProductsByUid(cloud.products, products, true);
+            const mergedMappings = mergeMappingsByBarcode(cloud.mappings, productMappings, true);
 
             await ghSave(mergedProducts, mergedMappings, '同步商品数据');
 
@@ -2007,6 +2106,7 @@ async function syncData() {
             updateProductList();
             updateMappingList();
             updateChart();
+            updateReminder();
 
             showToast('同步完成：商品 ' + mergedProducts.length + ' 条', '#45a049', 5000);
             alert('数据同步完成！\n商品: ' + mergedProducts.length + ' 条\n映射: ' + mergedMappings.length + ' 条');
@@ -2029,8 +2129,30 @@ async function syncData() {
     showToast('正在同步数据到云端...', '#4CAF50', 60000);
 
     try {
-        const productResult = await upsertCollection(PRODUCT_COLLECTION, products);
-        const mappingResult = await upsertCollection(MAPPING_COLLECTION, productMappings);
+        // 先把云端快照拉下来，逐条比最后修改时间再决定写什么：
+        //   · 本机是旧副本时，云端更新的记录（例如别的设备刚标记的处置）不会被覆盖掉
+        //   · 本机改得更晚的记录照常推上去
+        // 于是「先同步还是先获取」都不会丢数据，按钮顺序不再是坑
+        const cloudProductDocs = await fetchAllFromCloud(PRODUCT_COLLECTION);
+        const cloudMappingDocs = await fetchAllFromCloud(MAPPING_COLLECTION);
+
+        const mergedProducts = mergeProductsByUid(
+            cloudProductDocs.map(cloudDocToProduct), products, true);
+        const mergedMappings = mergeMappingsByBarcode(
+            cloudMappingDocs.map(cloudDocToMapping), productMappings, true);
+
+        const productResult = await upsertCollection(PRODUCT_COLLECTION, mergedProducts, cloudProductDocs);
+        const mappingResult = await upsertCollection(MAPPING_COLLECTION, mergedMappings, cloudMappingDocs);
+
+        // 本机也收敛到合并结果：否则界面还显示旧状态，看着像同步没生效
+        products = mergedProducts;
+        productMappings = mergedMappings;
+        saveProducts();
+        saveMappings();
+        updateProductList();
+        updateMappingList();
+        updateChart();
+        updateReminder();
 
         const successCount = productResult.success + mappingResult.success;
         const failCount = productResult.fail + mappingResult.fail;
@@ -2040,7 +2162,8 @@ async function syncData() {
             failCount === 0 ? '#45a049' : '#ff9800',
             5000
         );
-        alert('数据同步完成！\n共 ' + totalItems + ' 项\n成功: ' + successCount + ' 项\n失败: ' + failCount + ' 项');
+        alert('数据同步完成！\n商品: ' + mergedProducts.length + ' 条\n映射: ' + mergedMappings.length + ' 条\n' +
+              '写入成功: ' + successCount + ' 项' + (failCount > 0 ? '\n失败: ' + failCount + ' 项' : ''));
     } catch (error) {
         console.error('数据同步失败:', error);
         showToast('同步失败：' + (error.message || '未知错误'), '#f44336', 5000);
@@ -2050,16 +2173,18 @@ async function syncData() {
 
 // 把本地数组写入云端集合。
 // 商品按 uid 匹配；映射按条码匹配（一个条码本来就只该有一条映射）
-async function upsertCollection(collectionName, localItems) {
+async function upsertCollection(collectionName, localItems, cloudSnapshot) {
     const isProduct = collectionName === PRODUCT_COLLECTION;
-    // 字段清单必须和 fetchLatestDataFromCloud 的映射保持一致，漏一个就会出现「同步后处置状态丢了」
+    // 字段清单必须和 cloudDocToProduct / cloudDocToMapping 保持一致，
+    // 漏一个就会出现「同步后处置状态 / 修改时间丢了」
     const fields = isProduct
         ? ['uid', 'barcode', 'productName', 'type', 'scanDate', 'productionDate', 'shelfLife', 'shelfLifeUnit', 'validity',
-           'handledAction', 'handledAt', 'handledNote']
-        : ['barcode', 'productName'];
+           'handledAction', 'handledAt', 'handledNote', 'updatedAt']
+        : ['barcode', 'productName', 'updatedAt'];
 
-    // 1. 拉取云端已有记录，建立「匹配键 -> _id」映射
-    const cloudItems = await fetchAllFromCloud(collectionName);
+    // 1. 云端已有记录，建立「匹配键 -> _id」映射。
+    //    cloudSnapshot 是调用方刚拉过的快照，传了就直接用，不再多读一遍
+    const cloudItems = cloudSnapshot || await fetchAllFromCloud(collectionName);
     const idByKey = {};
     const legacyIdByBarcode = {};   // 迁移用：还没有 uid 的历史记录
 
@@ -2157,9 +2282,9 @@ async function fetchLatestDataFromCloud() {
         try {
             const cloud = await ghLoad();
 
-            // 与本地合并，而不是直接覆盖：云端万一比本地旧，覆盖会把本地记录整片抹掉
-            const mergedProducts = mergeProductsByUid(cloud.products, products);
-            const mergedMappings = mergeMappingsByBarcode(cloud.mappings, productMappings);
+            // 逐条比最后修改时间，谁新用谁：云端更新过的拉过来，本机刚改过的留着
+            const mergedProducts = mergeProductsByUid(cloud.products, products, false);
+            const mergedMappings = mergeMappingsByBarcode(cloud.mappings, productMappings, false);
             const addedProducts = mergedProducts.length - products.length;
             const addedMappings = mergedMappings.length - productMappings.length;
 
@@ -2170,9 +2295,10 @@ async function fetchLatestDataFromCloud() {
             updateProductList();
             updateMappingList();
             updateChart();
+            updateReminder();
 
             showToast('获取完成：商品 ' + mergedProducts.length + ' 条', '#45a049', 5000);
-            alert('已与云端数据合并！\n商品: ' + mergedProducts.length + ' 条（新增 ' + addedProducts + ' 条）\n' +
+            alert('已与云端数据合并（两边谁更新用谁）！\n商品: ' + mergedProducts.length + ' 条（新增 ' + addedProducts + ' 条）\n' +
                   '映射: ' + mergedMappings.length + ' 条（新增 ' + addedMappings + ' 条）');
         } catch (error) {
             console.error('GitHub 获取数据失败:', error);
@@ -2187,47 +2313,22 @@ async function fetchLatestDataFromCloud() {
     showToast('正在从云端获取最新数据...', '#2196F3', 60000);
 
     try {
-        const cloudProducts = await fetchAllFromCloud(PRODUCT_COLLECTION);
-        const cloudMappings = await fetchAllFromCloud(MAPPING_COLLECTION);
+        const cloudProductDocs = await fetchAllFromCloud(PRODUCT_COLLECTION);
+        const cloudMappingDocs = await fetchAllFromCloud(MAPPING_COLLECTION);
 
-        // 商品：先转成本地结构，再按 uid 与本地合并（不再直接覆盖）
-        const cloudProductsLocal = cloudProducts.map(function(doc) {
-            return {
-                id: doc.uid || doc._id,      // 兼容旧字段
-                uid: doc.uid || '',          // 空 uid 会在合并时补上，下次同步回填云端
-                barcode: doc.barcode,
-                productName: doc.productName,
-                type: doc.type || '商品',
-                scanDate: doc.scanDate || '',
-                productionDate: doc.productionDate || '',
-                shelfLife: doc.shelfLife || '',
-                shelfLifeUnit: doc.shelfLifeUnit || '月',
-                validity: doc.validity || '',
-                handledAction: doc.handledAction || '',
-                handledAt: doc.handledAt || '',
-                handledNote: doc.handledNote || '',
-                createdAt: doc._createTime
-                    ? new Date(doc._createTime).toISOString()
-                    : new Date().toISOString()
-            };
-        });
-
-        const mergedProducts = mergeProductsByUid(cloudProductsLocal, products);
+        // 逐条比最后修改时间，谁新用谁：云端更新过的拉过来，本机刚改过的留着
+        const mergedProducts = mergeProductsByUid(
+            cloudProductDocs.map(cloudDocToProduct), products, false);
         const addedProducts = mergedProducts.length - products.length;
 
         products = mergedProducts;
         saveProducts();
         updateProductList();
         updateChart();
+        updateReminder();
 
-        // 映射仍按条码合并
-        const mergedMappings = mergeMappingsByBarcode(cloudMappings.map(function(doc) {
-            return {
-                id: doc._id,
-                barcode: doc.barcode,
-                productName: doc.productName
-            };
-        }), productMappings);
+        const mergedMappings = mergeMappingsByBarcode(
+            cloudMappingDocs.map(cloudDocToMapping), productMappings, false);
         const addedMappings = mergedMappings.length - productMappings.length;
 
         productMappings = mergedMappings;
@@ -2239,7 +2340,7 @@ async function fetchLatestDataFromCloud() {
             '#45a049',
             5000
         );
-        alert('已与云端数据合并！\n商品: ' + mergedProducts.length + ' 条（新增 ' + addedProducts + ' 条）\n' +
+        alert('已与云端数据合并（两边谁更新用谁）！\n商品: ' + mergedProducts.length + ' 条（新增 ' + addedProducts + ' 条）\n' +
               '映射: ' + mergedMappings.length + ' 条（新增 ' + addedMappings + ' 条）');
     } catch (error) {
         console.error('获取云端数据失败:', error);
