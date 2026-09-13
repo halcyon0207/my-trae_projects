@@ -143,6 +143,11 @@ https://trae-projects-4g5aob6ufac38569-1421597865.tcloudbaseapp.com/?storage=git
 > 令牌是按域名隔离的：GitHub 令牌存在 `localStorage`，而 `localStorage` 分域名，
 > 所以换域名访问要重新填一次令牌。页面标题下方的小标签会显示当前在用哪套数据。
 
+> **部署完却看不到变化？** 静态托管的缓存策略是：`index.html` 只缓存 120 秒，
+> 而 `script.js` / `styles.css` 缓存 **一年**（`Cache-Control: max-age=31536000`）。
+> 只改 js 不换地址，浏览器和 CDN 会一直拿旧脚本（曾因此让腾讯云那边停在 9-11 的版本）。
+> 所以 `index.html` 里的资源地址都写成 `?v=日期`，**每次改完 css / js，把 `?v=` 的值改一下再部署**。
+
 ## 项目结构
 
 ```
