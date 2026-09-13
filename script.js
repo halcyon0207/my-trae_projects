@@ -2829,7 +2829,20 @@ function closeCloudWatchers() {
     cloudWatchers = [];
 }
 
-// ===================== PWA：Service Worker 与「安装到主屏幕」 =====================
+// ===================== PWA：Service Worker 与「安装 / 添加到桌面」 =====================
+// 提示过一次就记下来（按域名分开存），免得每次打开都挂个按钮
+const PWA_HINT_KEY = 'pwaInstallHintShown';
+const MANUAL_INSTALL_HINT = [
+    '把这个页面放到手机桌面：',
+    '',
+    '1. 点浏览器底部（或右下角）的菜单按钮（⋮ 或 ≡）',
+    '2. 选「添加到桌面」或「添加到主屏幕」',
+    '3. 确认后，桌面就会出现「到期提醒」图标',
+    '',
+    '说明：鸿蒙 / 华为浏览器没有 Google 服务，系统不会自动弹出安装提示，',
+    '只能手动从菜单添加。加到桌面后，点开就用，和装的应用差不多。'
+].join('\n');
+
 // 只在 http / https 下注册；用 file:// 本地打开时不注册、不报错
 function registerServiceWorker() {
     if (!('serviceWorker' in navigator) || window.location.protocol === 'file:') {
@@ -2844,37 +2857,79 @@ function registerServiceWorker() {
             console.error('Service Worker 注册失败:', error);
         });
 
-    // 安卓 Chrome 在满足安装条件时会触发这个事件；把默认提示卡换成页面上的小按钮
+    // 已经在独立窗口里跑，说明早就装过了，不再提示
+    if (isStandaloneMode()) return;
+
+    let hintShown = false;
+    try { hintShown = localStorage.getItem(PWA_HINT_KEY) === '1'; } catch (e) {}
+
     let installPromptEvent = null;
+    let systemPromptShown = false;
+
+    // Chrome / Edge 这类带应用商店能力的浏览器会触发本事件，可以直接弹系统安装框
     window.addEventListener('beforeinstallprompt', function(event) {
         event.preventDefault();
         installPromptEvent = event;
-        showPwaInstallButton();
+        systemPromptShown = true;
+        showPwaInstallButton('system');
     });
 
-    // iOS Safari 不会触发 beforeinstallprompt，所以没有按钮；
-    // 需要安装时用户自己用 Safari 的「分享 → 添加到主屏幕」。
+    // 鸿蒙（HarmonyOS NEXT）、iOS Safari 以及不少国产浏览器都不会触发上面那个事件
+    //（前两者没有 Google 服务，装不了 WebAPK），只能让用户自己去菜单里「添加到桌面」。
+    // 等一会儿还没等到，就给个按钮带一下路。
+    if (isMobileBrowser() && !hintShown) {
+        setTimeout(function() {
+            if (!systemPromptShown) showPwaInstallButton('manual');
+        }, 2500);
+    }
 
-    // 点击安装按钮后弹出系统安装提示
-    function showPwaInstallButton() {
+    // 是否已经在「安装后的独立窗口」里运行
+    function isStandaloneMode() {
+        return window.matchMedia('(display-mode: standalone)').matches ||
+               window.matchMedia('(display-mode: minimal-ui)').matches ||
+               window.navigator.standalone === true;
+    }
+
+    function isMobileBrowser() {
+        // 华为鸿蒙的 UA 里带 HarmonyOS；安卓与 iOS 一并覆盖
+        return /Android|HarmonyOS|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    }
+
+    // 两种按钮：
+    //   system —— 系统支持安装，点了直接弹安装框
+    //   manual —— 系统不支持（鸿蒙 / iOS），点了给一段「怎么加到桌面」的说明
+    function showPwaInstallButton(mode) {
         const badge = document.querySelector('.storage-badge');
         if (!badge) return;
         if (badge.parentNode.querySelector('.install-btn')) return;
 
         const button = document.createElement('button');
         button.className = 'install-btn';
-        button.textContent = '安装到主屏幕';
-        button.title = '安装后可在主屏幕直接打开，断网也能用';
+        button.textContent = mode === 'system' ? '安装到主屏幕' : '添加到桌面';
+        button.title = mode === 'system'
+            ? '安装后可在主屏幕直接打开，断网也能用'
+            : '点这里看怎么把这个页面放到手机桌面';
         button.addEventListener('click', async function() {
+            if (mode === 'manual') {
+                markHintShown();
+                alert(MANUAL_INSTALL_HINT);
+                return;
+            }
+
             if (!installPromptEvent) return;
             installPromptEvent.prompt();
             const result = await installPromptEvent.userChoice;
             if (result.outcome === 'accepted') {
+                markHintShown();
                 button.remove();
             }
             installPromptEvent = null;
         });
 
         badge.parentNode.insertBefore(button, badge.nextSibling);
+    }
+
+    function markHintShown() {
+        try { localStorage.setItem(PWA_HINT_KEY, '1'); } catch (e) {}
     }
 }

@@ -12,10 +12,10 @@
     <!-- 资源地址带版本号：静态托管的 Cache-Control 是 max-age=31536000（一年），
          CDN 和浏览器都会长期留着老副本，改了代码不加版本号就还是跑旧的。
          每次改完 css / js，把下面的 v 值换一下（例如换成当天日期）再部署 -->
-    <link rel="stylesheet" href="styles.css?v=20260913b">
+    <link rel="stylesheet" href="styles.css?v=20260913c">
     <!-- 扫码库放在本地，避免国内访问 CDN 不稳定甚至加载不出来。
          图表已改成一行统计标签，不再需要 Chart.js（顺带省下 205KB） -->
-    <script src="html5-qrcode.min.js?v=20260913b"></script>
+    <script src="html5-qrcode.min.js?v=20260913c"></script>
     <!-- CloudBase SDK 体积较大且只在腾讯云模式用到，改为需要时再动态加载（见 script.js） -->
 </head>
 <body>
@@ -206,6 +206,6 @@
         </div>
     </div>
 
-    <script src="script.js?v=20260913b"></script>
+    <script src="script.js?v=20260913c"></script>
 </body>
 </html>
