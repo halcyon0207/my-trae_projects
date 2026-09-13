@@ -41,6 +41,27 @@ header h1 {
     font-size: 0.85rem;
 }
 
+/* PWA「安装到主屏幕」按钮，安卓 Chrome 满足安装条件时由 script.js 自动插入 */
+.install-btn {
+    display: inline-block;
+    margin-left: 10px;
+    margin-top: 10px;
+    padding: 4px 14px;
+    border: none;
+    border-radius: 999px;
+    background-color: #fff;
+    color: #4CAF50;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12);
+    transition: background-color 0.2s ease;
+}
+
+.install-btn:hover {
+    background-color: #f0f0f0;
+}
+
 /* 添加商品：收起时整块只剩标题栏那一条，所以内边距挪给内部的 form，
    否则收起状态下还会凭空多出 40px 空白 */
 .form-section {

@@ -669,6 +669,9 @@ function initializeApp() {
     // 绑定事件监听器
     bindEventListeners();
 
+    // 注册 PWA Service Worker：让页面可安装、断网也能打开
+    registerServiceWorker();
+
     // 顶部标出这份页面在读写哪套数据，省得以为是「数据丢了 / 变回最初版本」
     renderStorageBadge();
 
@@ -2824,4 +2827,54 @@ function closeCloudWatchers() {
         }
     });
     cloudWatchers = [];
+}
+
+// ===================== PWA：Service Worker 与「安装到主屏幕」 =====================
+// 只在 http / https 下注册；用 file:// 本地打开时不注册、不报错
+function registerServiceWorker() {
+    if (!('serviceWorker' in navigator) || window.location.protocol === 'file:') {
+        return;
+    }
+
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+        .then(function(registration) {
+            console.log('Service Worker 注册成功:', registration.scope);
+        })
+        .catch(function(error) {
+            console.error('Service Worker 注册失败:', error);
+        });
+
+    // 安卓 Chrome 在满足安装条件时会触发这个事件；把默认提示卡换成页面上的小按钮
+    let installPromptEvent = null;
+    window.addEventListener('beforeinstallprompt', function(event) {
+        event.preventDefault();
+        installPromptEvent = event;
+        showPwaInstallButton();
+    });
+
+    // iOS Safari 不会触发 beforeinstallprompt，所以没有按钮；
+    // 需要安装时用户自己用 Safari 的「分享 → 添加到主屏幕」。
+
+    // 点击安装按钮后弹出系统安装提示
+    function showPwaInstallButton() {
+        const badge = document.querySelector('.storage-badge');
+        if (!badge) return;
+        if (badge.parentNode.querySelector('.install-btn')) return;
+
+        const button = document.createElement('button');
+        button.className = 'install-btn';
+        button.textContent = '安装到主屏幕';
+        button.title = '安装后可在主屏幕直接打开，断网也能用';
+        button.addEventListener('click', async function() {
+            if (!installPromptEvent) return;
+            installPromptEvent.prompt();
+            const result = await installPromptEvent.userChoice;
+            if (result.outcome === 'accepted') {
+                button.remove();
+            }
+            installPromptEvent = null;
+        });
+
+        badge.parentNode.insertBefore(button, badge.nextSibling);
+    }
 }
