@@ -130,9 +130,9 @@ GitHub Pages 版读写 `product-expiry` 仓库里的 `data.json`，腾讯云版�
 
 1. 网址参数 `?storage=github` 或 `?storage=cloudbase` —— 优先，同时记到本机
 2. 本机记住的上一次选择 —— 所以带参数访问过一次就够了，之后直接开域名也生效
-3. 域名默认值：`*.github.io` 用 GitHub，其余（含腾讯云域名、本地打开的文件）用 CloudBase
+3. 域名默认值：`*.github.io` 和当前的腾讯云域名默认用 GitHub；本地用 `file://` 打开时默认走 CloudBase（方便没令牌时调试）
 
-例如让腾讯云那份也共用 GitHub 数据，访问一次这个地址即可：
+所以腾讯云那份直接打开就是 GitHub 数据，不用每次都带参数。如果某个时刻想临时切到 CloudBase，可以访问一次：
 
 ```
 https://trae-projects-4g5aob6ufac38569-1421597865.tcloudbaseapp.com/?storage=github

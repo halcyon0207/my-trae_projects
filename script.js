@@ -22,16 +22,22 @@ const GH_REPO  = 'product-expiry';     // 存放数据的仓库名
 const GH_FILE  = 'data.json';          // 数据文件名
 const GH_API   = 'https://api.github.com';
 
-// 数据存哪儿：GitHub 仓库（github.io 域名默认）还是 CloudBase 数据库（其他域名默认）。
+// 数据存哪儿：GitHub 仓库（默认）还是 CloudBase 数据库（本地文件调试时用）。
 //
 // 同一个页面会被部署到两处（GitHub Pages、腾讯云 CloudBase 静态托管），
 // 而两处的数据是分开的：一个在 product-expiry 仓库的 data.json，一个在云数据库。
 // 为了不让同一个网址偶尔看到「另一套旧数据」，模式选择按下面顺序确定：
 //   1. 网址参数 ?storage=github 或 ?storage=cloudbase —— 最高优先级，并会被记到本机
 //   2. 本机记住的上一次选择（localStorage）—— 所以带参数访问过一次就够了
-//   3. 域名的默认值：github.io 走 GitHub，其余（含腾讯云域名、本地文件）走 CloudBase
+//   3. 域名默认值：github.io 以及当前腾讯云域名走 GitHub，其余走 CloudBase
+//      （本地用 file:// 打开时默认走 CloudBase，方便在没 GitHub 令牌时调试）
 const STORAGE_MODE_KEY = 'storageMode';
 let storageModeFromUrl = false;   // 本次是不是靠网址参数切的（用来提示一次）
+const DEFAULT_GITHUB_HOSTS = [
+    /\.github\.io$/i,
+    // 当前这个腾讯云静态托管域名，默认就用 GitHub 数据，不必每次手动带 ?storage=github
+    /trae-projects-4g5aob6ufac38569.*\.tcloudbaseapp\.com$/i
+];
 const IS_GITHUB_PAGES = (function() {
     const fromUrl = /[?&]storage=(github|cloudbase)/i.exec(location.search);
 
@@ -46,7 +52,7 @@ const IS_GITHUB_PAGES = (function() {
     try { saved = localStorage.getItem(STORAGE_MODE_KEY) || ''; } catch (e) {}
     if (saved) return saved === 'github';
 
-    return /\.github\.io$/i.test(location.hostname);
+    return DEFAULT_GITHUB_HOSTS.some(function(re) { return re.test(location.hostname); });
 })();
 
 let cbApp = null;         // CloudBase 应用实例
