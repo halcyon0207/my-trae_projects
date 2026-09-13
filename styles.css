@@ -30,6 +30,17 @@ header h1 {
     font-weight: 600;
 }
 
+/* 数据源小标签：同一份页面在 GitHub Pages 和腾讯云各部署一份，
+   各自连的数据不同，标出来才知道自己正在看哪一套（见 script.js 的 renderStorageBadge） */
+.storage-badge {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 3px 12px;
+    border-radius: 999px;
+    background-color: rgba(255, 255, 255, 0.22);
+    font-size: 0.85rem;
+}
+
 /* 添加商品：收起时整块只剩标题栏那一条，所以内边距挪给内部的 form，
    否则收起状态下还会凭空多出 40px 空白 */
 .form-section {

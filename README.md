@@ -120,6 +120,29 @@
 
 > 提示：如果数据量很少，也可以直接在浏览器里点「获取最新数据」前，先手动把数据敲进新系统；或者先导出 CSV，在 CloudBase 里重新录入后用「同步数据」上传。
 
+### 6. 同一份页面部署在两处时，数据到底存在哪儿
+
+页面会同时部署到 GitHub Pages 和腾讯云 CloudBase 静态托管，但**数据仍分两套**：
+GitHub Pages 版读写 `product-expiry` 仓库里的 `data.json`，腾讯云版默认读写 CloudBase 数据库。
+所以「换个网址打开就看到旧数据」通常不是同步坏了，而是打开的是另一套数据。
+
+数据源按下面的顺序确定（见 `script.js` 顶部）：
+
+1. 网址参数 `?storage=github` 或 `?storage=cloudbase` —— 优先，同时记到本机
+2. 本机记住的上一次选择 —— 所以带参数访问过一次就够了，之后直接开域名也生效
+3. 域名默认值：`*.github.io` 用 GitHub，其余（含腾讯云域名、本地打开的文件）用 CloudBase
+
+例如让腾讯云那份也共用 GitHub 数据，访问一次这个地址即可：
+
+```
+https://trae-projects-4g5aob6ufac38569-1421597865.tcloudbaseapp.com/?storage=github
+```
+
+想切回云数据库，换成 `?storage=cloudbase` 访问一次。
+
+> 令牌是按域名隔离的：GitHub 令牌存在 `localStorage`，而 `localStorage` 分域名，
+> 所以换域名访问要重新填一次令牌。页面标题下方的小标签会显示当前在用哪套数据。
+
 ## 项目结构
 
 ```

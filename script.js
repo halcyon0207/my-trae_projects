@@ -22,9 +22,32 @@ const GH_REPO  = 'product-expiry';     // 存放数据的仓库名
 const GH_FILE  = 'data.json';          // 数据文件名
 const GH_API   = 'https://api.github.com';
 
-// 页面是否运行在 GitHub Pages 上；是则改用 GitHub 仓库作为数据存储
-const IS_GITHUB_PAGES = /\.github\.io$/i.test(location.hostname) ||
-                        /[?&]storage=github/i.test(location.search);   // 本地可用 ?storage=github 预览 GitHub 模式
+// 数据存哪儿：GitHub 仓库（github.io 域名默认）还是 CloudBase 数据库（其他域名默认）。
+//
+// 同一个页面会被部署到两处（GitHub Pages、腾讯云 CloudBase 静态托管），
+// 而两处的数据是分开的：一个在 product-expiry 仓库的 data.json，一个在云数据库。
+// 为了不让同一个网址偶尔看到「另一套旧数据」，模式选择按下面顺序确定：
+//   1. 网址参数 ?storage=github 或 ?storage=cloudbase —— 最高优先级，并会被记到本机
+//   2. 本机记住的上一次选择（localStorage）—— 所以带参数访问过一次就够了
+//   3. 域名的默认值：github.io 走 GitHub，其余（含腾讯云域名、本地文件）走 CloudBase
+const STORAGE_MODE_KEY = 'storageMode';
+let storageModeFromUrl = false;   // 本次是不是靠网址参数切的（用来提示一次）
+const IS_GITHUB_PAGES = (function() {
+    const fromUrl = /[?&]storage=(github|cloudbase)/i.exec(location.search);
+
+    if (fromUrl) {
+        const mode = fromUrl[1].toLowerCase();
+        try { localStorage.setItem(STORAGE_MODE_KEY, mode); } catch (e) {}
+        storageModeFromUrl = true;
+        return mode === 'github';
+    }
+
+    let saved = '';
+    try { saved = localStorage.getItem(STORAGE_MODE_KEY) || ''; } catch (e) {}
+    if (saved) return saved === 'github';
+
+    return /\.github\.io$/i.test(location.hostname);
+})();
 
 let cbApp = null;         // CloudBase 应用实例
 let cbDb = null;          // 数据库实例
@@ -640,6 +663,15 @@ function initializeApp() {
     // 绑定事件监听器
     bindEventListeners();
 
+    // 顶部标出这份页面在读写哪套数据，省得以为是「数据丢了 / 变回最初版本」
+    renderStorageBadge();
+
+    // 刚用网址参数切过数据源：本机缓存里还是另一套，提醒先拉一次
+    if (storageModeFromUrl) {
+        showToast('数据源已切换为 ' + storageModeLabel() +
+                  '，建议先点「获取最新数据」', '#ff9800', 6000);
+    }
+
     // 加载数据
     loadData();
 
@@ -659,6 +691,24 @@ function initializeApp() {
     } catch (error) {
         console.error('重置表单失败:', error);
     }
+}
+
+// 当前这份数据存在哪儿（提示文案和顶部标签共用）
+function storageModeLabel() {
+    return IS_GITHUB_PAGES ? 'GitHub 仓库' : '腾讯云开发数据库';
+}
+
+// 页面标题下挂一个小标签，明示此刻读写的是哪套数据：
+// 同一个页面部署在 GitHub Pages 和腾讯云两处，各自连的数据并不相同，
+// 没有这个标签很容易把「另一套数据」误会成数据丢失或同步失败
+function renderStorageBadge() {
+    const header = document.querySelector('header');
+    if (!header || header.querySelector('.storage-badge')) return;
+
+    const badge = document.createElement('span');
+    badge.className = 'storage-badge';
+    badge.textContent = '数据源：' + storageModeLabel();
+    header.appendChild(badge);
 }
 
 function bindEventListeners() {
@@ -2090,18 +2140,107 @@ function mergeProducts(cloudList, localList, localTombstones, preferLocal) {
 
     // 1. 活记录：云端那份先铺底，输出顺序就稳定，同步前后列表不会莫名重排
     const liveByUid = new Map();
+    const cloudByUid = new Map();           // 云端：uid → 记录
+    const cloudByFingerprint = new Map();   // 云端：条码 + 生产日期 → 记录
+    const cloudByBarcode = new Map();       // 云端：条码 → 记录（有一边缺生产日期时的兜底）
+
+    function pushIndex(index, key, record) {
+        const bucket = index.get(key);
+        if (bucket) bucket.push(record);
+        else index.set(key, [record]);
+    }
+
     cloudWithUid.forEach(function(product) {
         liveByUid.set(String(product.uid), product);
+        cloudByUid.set(String(product.uid), product);
+        pushIndex(cloudByFingerprint, productFingerprint(product), product);
+        pushIndex(cloudByBarcode, String(product.barcode || ''), product);
     });
+
+    // 已经配过对的云端记录，不能再被本机另一条认领
+    const claimedUids = new Set();
+
+    // uid 对不上时（同一件东西在两台设备上各自补过一个 uid）退回按内容认领：
+    // 先比「条码 + 生产日期」，有一边没记生产日期时再退一步只比条码。
+    // 少了这一步，另一台设备点「获取最新数据」会看到整份列表翻倍，
+    // 而且本机这条（例如刚标记的「已处理」）和云端那条被算成两件东西
+    function claimCloudRecord(product) {
+        // 没有条码就没法可靠判断是不是同一条（空指纹会把一堆无关记录串在一起），只按 uid 区分
+        if (!product.barcode) return null;
+
+        const byFingerprint = cloudByFingerprint.get(productFingerprint(product)) || [];
+        // 两边都写了生产日期时，日期不同就是不同批次，不能算同一条
+        const byBarcode = (cloudByBarcode.get(String(product.barcode)) || [])
+            .filter(function(record) {
+                return !product.productionDate || !record.productionDate;
+            });
+
+        const candidates = byFingerprint.concat(byBarcode);
+        for (let i = 0; i < candidates.length; i++) {
+            const key = String(candidates[i].uid);
+            if (!claimedUids.has(key)) {
+                claimedUids.add(key);
+                return candidates[i];
+            }
+        }
+        return null;
+    }
 
     localWithUid.forEach(function(product) {
         const key = String(product.uid);
-        const cloudRecord = liveByUid.get(key);
-        // 只在本机存在、云端没有的记录，走 else 分支原样留下
-        liveByUid.set(key, cloudRecord ? pickNewerRecord(cloudRecord, product, preferLocal) : product);
+        const byUid = cloudByUid.get(key);
+
+        if (byUid) {
+            claimedUids.add(key);
+            liveByUid.set(key, pickNewerRecord(byUid, product, preferLocal));
+            return;
+        }
+
+        const claimed = claimCloudRecord(product);
+        if (claimed) {
+            // 身份沿用云端那条：下次同步两边才认得出是同一条，不会再各留一份
+            const winner = pickNewerRecord(claimed, product, preferLocal);
+            winner.uid = claimed.uid;
+            liveByUid.set(String(claimed.uid), winner);
+            return;
+        }
+
+        // 只在本机存在、云端没有的记录，原样留下，下次同步会推上去
+        liveByUid.set(key, product);
     });
 
-    // 2. 墓碑：同一件东西两边可能各留过一条（删了又删），取时间最新的那条
+    // 2. 兜底去重：条码 + 生产日期相同的记录只留最近改过的一条。
+    // 本机列表如果已经被「uid 不一致」撑成了两份，这一步顺手收敛回一条，不用手工删重复
+    const deduped = [];
+    const fingerprintIndex = new Map();
+
+    liveByUid.forEach(function(product) {
+        // 没有条码就没法可靠判断是不是同一条，只按 uid 区分
+        const fingerprint = product.barcode
+            ? productFingerprint(product)
+            : 'uid\u0001' + String(product.uid);
+        const at = fingerprintIndex.get(fingerprint);
+
+        if (at === undefined) {
+            fingerprintIndex.set(fingerprint, deduped.length);
+            deduped.push(product);
+            return;
+        }
+
+        const kept = deduped[at];
+        const winner = pickNewerRecord(kept, product, preferLocal);
+
+        // 内容可以换成更新的那份，身份要留住云端已经写下的那个 uid，
+        // 否则别的设备手里那份又会对不上、重新分裂成两条
+        if (String(kept.uid) !== String(product.uid)) {
+            if (cloudByUid.has(String(kept.uid))) winner.uid = kept.uid;
+            else if (cloudByUid.has(String(product.uid))) winner.uid = product.uid;
+        }
+
+        deduped[at] = winner;
+    });
+
+    // 3. 墓碑：同一件东西两边可能各留过一条（删了又删），取时间最新的那条
     const tombByKey = new Map();
 
     function rememberTombstone(tombstone) {
@@ -2117,9 +2256,11 @@ function mergeProducts(cloudList, localList, localTombstones, preferLocal) {
     cloudTombstones.forEach(rememberTombstone);
     (localTombstones || []).forEach(rememberTombstone);
 
-    // 3. 墓碑与活记录对账
+    // 4. 墓碑与活记录对账
+    const finalByUid = new Map();
     const liveByFingerprint = new Map();
-    liveByUid.forEach(function(product) {
+    deduped.forEach(function(product) {
+        finalByUid.set(String(product.uid), product);
         liveByFingerprint.set(productFingerprint(product), product);
     });
 
@@ -2128,7 +2269,7 @@ function mergeProducts(cloudList, localList, localTombstones, preferLocal) {
 
     tombByKey.forEach(function(tombstone) {
         // 优先按 uid 找；云端还挂着没 uid 的老记录时，靠「条码 + 生产日期」认领
-        let target = tombstone.uid ? liveByUid.get(String(tombstone.uid)) : null;
+        let target = tombstone.uid ? finalByUid.get(String(tombstone.uid)) : null;
         if (!target) target = liveByFingerprint.get(productFingerprint(tombstone));
 
         if (target && recordModifiedTime(target) > recordModifiedTime(tombstone)) {
@@ -2139,7 +2280,7 @@ function mergeProducts(cloudList, localList, localTombstones, preferLocal) {
     });
 
     return {
-        products: Array.from(liveByUid.values()).filter(function(product) {
+        products: deduped.filter(function(product) {
             return !deletedUids.has(String(product.uid));
         }),
         tombstones: tombstones
@@ -2524,6 +2665,19 @@ async function fetchLatestDataFromCloud() {
             updateMappingList();
             updateReminder();
 
+            // 本机较新的改动（例如刚标记的「已处理」）一并写回云端：
+            // 只拉不推的话，本机改过的东西别的设备永远看不到
+            try {
+                await ghSave(
+                    mergedProducts.products.concat(mergedProducts.tombstones),
+                    mergedMappings.mappings.concat(mergedMappings.tombstones),
+                    '获取最新数据'
+                );
+            } catch (writeError) {
+                console.error('回写云端失败:', writeError);
+                showToast('本地已合并，但回写云端失败：' + (writeError.message || '未知错误'), '#ff9800', 5000);
+            }
+
             showToast('获取完成：商品 ' + products.length + ' 条', '#45a049', 5000);
             alert('已与云端数据合并（两边谁更新用谁）！\n' +
                   '商品: ' + products.length + ' 条（新增 ' + addedProducts + '，删除 ' + removedProducts + '）\n' +
@@ -2568,6 +2722,17 @@ async function fetchLatestDataFromCloud() {
         saveMappings();
         saveTombstones();
         updateMappingList();
+
+        // 本机较新的改动一并写回云端（同 GitHub 分支的说明）：
+        // 只拉不推的话，本机改过的东西别的设备永远看不到
+        try {
+            await upsertCollection(
+                PRODUCT_COLLECTION, products.concat(productTombstones), cloudProductDocs);
+            await upsertCollection(
+                MAPPING_COLLECTION, productMappings.concat(mappingTombstones), cloudMappingDocs);
+        } catch (writeError) {
+            console.error('回写云端失败:', writeError);
+        }
 
         showToast(
             '数据获取完成：商品 ' + products.length + ' 条，映射 ' + productMappings.length + ' 条',
