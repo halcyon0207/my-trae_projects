@@ -1,0 +1,12 @@
+{
+  "name": "expire-notify",
+  "version": "1.0.0",
+  "main": "index.js",
+  "description": "每天定时扫商品表，过期/临期通过 PushPlus 推送到微信",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@cloudbase/node-sdk": "^2.6.0"
+  }
+}

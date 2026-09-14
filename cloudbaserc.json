@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.cloudbase.net/cli/cloudbaserc.schema.json",
+  "version": "2.0",
+  "envId": "trae-projects-4g5aob6ufac38569",
+  "functionRoot": "cloudfunctions",
+  "functions": [
+    {
+      "name": "expire-notify",
+      "runtime": "Nodejs20.19",
+      "timeout": 30,
+      "memorySize": 128,
+      "installDependency": true,
+      "handler": "index.main",
+      "description": "每天定时扫商品表，过期/临期通过 PushPlus 推送到微信",
+      "triggers": [
+        {
+          "name": "daily-9am",
+          "type": "timer",
+          "cron": "0 0 9 * * * *"
+        }
+      ],
+      "envVariables": {
+        "PUSHPLUS_TOKEN": ""
+      }
+    }
+  ]
+}
