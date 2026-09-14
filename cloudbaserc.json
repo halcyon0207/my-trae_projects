@@ -16,7 +16,7 @@
         {
           "name": "daily-9am",
           "type": "timer",
-          "cron": "0 0 9 * * * *"
+          "config": "0 0 9 * * * *"
         }
       ],
       "envVariables": {

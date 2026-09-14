@@ -46,8 +46,8 @@ exports.main = async () => {
 async function fetchProducts() {
     const res = await db.collection('products').where({}).limit(1000).get();
     const list = res.data || [];
-    // 已处理（handledAt 有值）的跳过 —— 提醒过的别再骚扰
-    return list.filter((p) => !p.handledAt);
+    // 已处理（handledAt 有值）或已删除墓碑（deletedAt 有值）的跳过
+    return list.filter((p) => !p.handledAt && !p.deletedAt);
 }
 
 function classify(products) {
