@@ -1,0 +1,14 @@
+# 本地私密配置（PushPlus / GitHub Token / 访问口令），不要提交
+.env
+.env.local
+.env.*.local
+
+# 依赖与产物
+node_modules/
+cloudfunctions/*/node_modules/
+
+# 部署时由 scripts/deploy.ps1 从 shared/ 复制过来，唯一真身在 shared/
+cloudfunctions/*/lib/
+
+# 发布静态页面时的暂存目录
+.deploy-tmp/

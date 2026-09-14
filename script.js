@@ -1,67 +1,51 @@
 /* ============================================================
- * 商品到期提醒系统
- * 云端存储：腾讯云开发 CloudBase（替代已停服的 LeanCloud）
+ * 商品到期提醒系统 —— 前端
  *
- * 使用前必须完成的配置（详见 README.md）：
- *   1. 注册腾讯云开发 https://tcb.cloud.tencent.com/ 并创建环境
- *   2. 把下面的 ENV_ID 替换成你自己的「环境 ID」
- *   3. 控制台开启「匿名登录」，并把 Product / Mapping 两个集合的
- *      权限设置为「所有用户可读写」（否则换设备看不到数据）
+ * 数据怎么走：
+ *   页面 --(访问口令)--> 云函数 product-api --(GitHub 令牌)--> 仓库 data.json
+ * 浏览器里不再保存任何仓库令牌，也不直连数据库：令牌只存在云端环境变量，
+ * 页面只跟自己的接口说话，且要带上访问口令。
+ *
+ * 合并规则 / 日期 / CSV 都在 shared/ 里，云函数与页面共用同一份代码
+ * （index.html 先加载 shared/*.js，再加载本文件；云函数由部署脚本复制到 lib/）。
+ * 本文件只负责：界面、本机缓存（localStorage）、调用接口。
  * ============================================================ */
 
-/* ===================== 0. 云端配置 ===================== */
-const ENV_ID = 'trae-projects-4g5aob6ufac38569';   // CloudBase 环境 ID
-const ACCESS_KEY = '';                 // 一般留空；若报鉴权失败，再填 Publishable Key
-const PRODUCT_COLLECTION = 'Product';  // 商品集合名（需与云端一致）
-const MAPPING_COLLECTION = 'Mapping';  // 条码映射集合名（需与云端一致）
-const PAGE_SIZE = 1000;                // 单次查询上限（CloudBase 最大 1000 条）
-
-/* ---- GitHub 存储配置（供 GitHub Pages 版本使用）---- */
-const GH_OWNER = 'halcyon0207';        // GitHub 用户名
-const GH_REPO  = 'product-expiry';     // 存放数据的仓库名
-const GH_FILE  = 'data.json';          // 数据文件名
-const GH_API   = 'https://api.github.com';
-
-// 数据存哪儿：GitHub 仓库（默认）还是 CloudBase 数据库（本地文件调试时用）。
-//
-// 同一个页面会被部署到两处（GitHub Pages、腾讯云 CloudBase 静态托管），
-// 而两处的数据是分开的：一个在 product-expiry 仓库的 data.json，一个在云数据库。
-// 为了不让同一个网址偶尔看到「另一套旧数据」，模式选择按下面顺序确定：
-//   1. 网址参数 ?storage=github 或 ?storage=cloudbase —— 最高优先级，并会被记到本机
-//   2. 本机记住的上一次选择（localStorage）—— 所以带参数访问过一次就够了
-//   3. 域名默认值：github.io 以及当前腾讯云域名走 GitHub，其余走 CloudBase
-//      （本地用 file:// 打开时默认走 CloudBase，方便在没 GitHub 令牌时调试）
-const STORAGE_MODE_KEY = 'storageMode';
-let storageModeFromUrl = false;   // 本次是不是靠网址参数切的（用来提示一次）
-const DEFAULT_GITHUB_HOSTS = [
-    /\.github\.io$/i,
-    // 当前这个腾讯云静态托管域名，默认就用 GitHub 数据，不必每次手动带 ?storage=github
-    /trae-projects-4g5aob6ufac38569.*\.tcloudbaseapp\.com$/i
-];
-const IS_GITHUB_PAGES = (function() {
-    const fromUrl = /[?&]storage=(github|cloudbase)/i.exec(location.search);
-
-    if (fromUrl) {
-        const mode = fromUrl[1].toLowerCase();
-        try { localStorage.setItem(STORAGE_MODE_KEY, mode); } catch (e) {}
-        storageModeFromUrl = true;
-        return mode === 'github';
-    }
-
-    let saved = '';
-    try { saved = localStorage.getItem(STORAGE_MODE_KEY) || ''; } catch (e) {}
-    if (saved) return saved === 'github';
-
-    return DEFAULT_GITHUB_HOSTS.some(function(re) { return re.test(location.hostname); });
+/* 把共享模块挂到全局。
+   原来是「顶层函数即全局函数」，页面上有内联 onclick，所以这里不能用
+   const 解构（那样不会成为 window 属性，内联事件会找不到函数）。 */
+(function exposeSharedModules() {
+    const shared = window.ExpiryShared || {};
+    ['dates', 'merge', 'csv'].forEach(function(name) {
+        const mod = shared[name];
+        if (!mod) {
+            console.error('共享模块未加载：shared/' + name + '.js');
+            return;
+        }
+        Object.keys(mod).forEach(function(key) {
+            window[key] = mod[key];
+        });
+    });
 })();
 
-let cbApp = null;         // CloudBase 应用实例
-let cbDb = null;          // 数据库实例
-let cloudReady = false;   // 云端是否已就绪
-let cloudWatchers = [];   // 实时监听句柄
+/* ===================== 0. 接口配置 ===================== */
+// 数据接口地址：CloudBase「HTTP 访问服务」里绑到云函数 product-api 的路径
+const API_BASE = 'https://trae-projects-4g5aob6ufac38569-1421597865.ap-shanghai.app.tcloudbase.com/api';
+const API_KEY_STORE = 'apiKey';
 
-let ghToken = localStorage.getItem('ghToken') || '';   // GitHub 访问令牌（只存在本机）
-let ghSha = null;         // 数据文件当前版本号（写入时必需）
+let apiKey = localStorage.getItem(API_KEY_STORE) || '';   // 访问口令（只存在本机）
+// 临期窗口天数：由接口下发（product-api 的 REMIND_DAYS），
+// 这样「页面判紧急」和「服务端推送」用的是同一个阈值，不会两边各写一个 30
+let remindDays = 30;
+
+// 数据只有一份：product-expiry 仓库里的 data.json，由云函数读写。
+// 以前这里有一套「GitHub 仓库 / CloudBase 数据库」双模式切换，已经删掉：
+//   · 两套数据谁也不认识谁，「换个网址打开看到旧数据」的困惑全来自这里
+//   · 云数据库还得把集合权限开成「所有用户可读写」，等于把数据交出去
+// 现在页面不管部署在 GitHub Pages 还是腾讯云，读写的都是同一份数据。
+//
+// 顺带说明：老版本用过的 localStorage 键（ghToken / storageMode）不再使用，
+// 但也不主动去删 —— 万一你哪天想回滚旧版本，令牌还在。
 
 /* ===================== 1. 本地数据 ===================== */
 let products = JSON.parse(localStorage.getItem('products')) || [];
@@ -417,252 +401,106 @@ function stopScanner() {
     }
 }
 
-/* ============ 3. 存储后端：GitHub（GitHub Pages 版本使用） ============
- * 页面部署在 GitHub Pages 时，数据以 data.json 的形式存放在 GitHub 仓库里，
- * 通过 GitHub 官方 API 读写。不需要服务器，也没有过期时间。
+/* ============ 3. 数据接口（云函数 product-api） ============
+ * 页面不直连仓库、也不直连数据库，所有数据操作都交给云函数，它做三件事：
+ *   校验访问口令 → 与云端合并 → 读写 data.json
+ * 好处：仓库令牌不出现在浏览器里；写入前由服务端先合并，两台设备同时改也不会互相覆盖。
  * ==================================================================== */
 
-function ghHeaders() {
-    const headers = { 'Accept': 'application/vnd.github+json' };
-    if (ghToken) headers['Authorization'] = 'Bearer ' + ghToken;
-    return headers;
-}
+// 首次使用：让用户填一次访问口令（存在本机，以后不用再填）
+async function ensureApiKey() {
+    if (apiKey) return true;
 
-// 首次使用：引导用户在本机保存一次访问令牌
-async function ensureGhToken() {
-    if (ghToken) return true;
-
-    const token = window.prompt(
-        '首次使用需要在本机保存一次 GitHub 访问令牌（Token）。\n\n' +
-        '保存后以后都不用再填。\n\n' +
-        '还没有令牌的话：\n' +
-        'GitHub 右上角头像 → Settings → Developer settings →\n' +
-        'Personal access tokens → Tokens (classic) →\n' +
-        'Generate new token (classic)，勾选 repo 权限，生成后复制过来。'
+    const input = window.prompt(
+        '首次使用需要填写一次「访问口令」。\n\n' +
+        '口令是部署时设定的（云函数环境变量 API_KEY，也写在项目的 .env.local 里）。\n' +
+        '填过一次就记在本机，换手机或换浏览器时需要再填一次。'
     );
 
-    if (!token || !token.trim()) {
-        showToast('未填写令牌，暂时无法访问云端数据', '#ff9800');
+    if (!input || !input.trim()) {
+        showToast('未填写访问口令，暂时无法同步数据', '#ff9800');
         return false;
     }
 
-    ghToken = token.trim();
-    localStorage.setItem('ghToken', ghToken);
-    showToast('令牌已保存到本机', '#4CAF50');
-    return true;
-}
+    apiKey = input.trim();
+    localStorage.setItem(API_KEY_STORE, apiKey);
 
-// UTF-8 与 Base64 互转（GitHub API 以 Base64 传输文件内容）
-function encodeBase64Utf8(str) {
-    const bytes = new TextEncoder().encode(str);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return btoa(binary);
-}
-
-function decodeBase64Utf8(b64) {
-    const binary = atob(String(b64).replace(/\s/g, ''));
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return new TextDecoder().decode(bytes);
-}
-
-// 读取仓库中的 data.json
-async function ghLoad() {
-    const url = GH_API + '/repos/' + GH_OWNER + '/' + GH_REPO +
-                '/contents/' + GH_FILE + '?t=' + Date.now();
-
-    const res = await fetch(url, { headers: ghHeaders(), cache: 'no-store' });
-
-    if (res.status === 404) {
-        ghSha = null;
-        return { products: [], mappings: [] };
-    }
-    if (res.status === 401 || res.status === 403) {
-        ghToken = '';
-        localStorage.removeItem('ghToken');
-        throw new Error('令牌无效或已过期，请重新填写');
-    }
-    if (!res.ok) {
-        throw new Error('读取数据失败（HTTP ' + res.status + '）');
-    }
-
-    const json = await res.json();
-    ghSha = json.sha;
-
-    let parsed = {};
+    // 立刻验一次：口令错了当场就知道，不用等到同步一半才报错
     try {
-        parsed = JSON.parse(decodeBase64Utf8(json.content) || '{}');
-    } catch (e) {
-        parsed = {};
+        await apiRequest('hello');
+        showToast('访问口令已保存到本机', '#4CAF50');
+        return true;
+    } catch (error) {
+        apiKey = '';
+        localStorage.removeItem(API_KEY_STORE);
+        showToast('口令校验失败：' + (error.message || '未知错误'), '#f44336', 5000);
+        return false;
     }
-
-    return {
-        products: parsed.products || [],
-        mappings: parsed.mappings || []
-    };
 }
 
-// 把数据写回仓库中的 data.json（全量覆盖）
-async function ghSave(newProducts, newMappings, message, isRetry) {
-    const payload = JSON.stringify({
-        products: newProducts,
-        mappings: newMappings,
-        updatedAt: new Date().toISOString()
-    }, null, 2);
-
-    const body = {
-        message: message || ('更新数据 ' + new Date().toLocaleString('zh-CN')),
-        content: encodeBase64Utf8(payload)
-    };
-    if (ghSha) body.sha = ghSha;
-
-    const res = await fetch(
-        GH_API + '/repos/' + GH_OWNER + '/' + GH_REPO + '/contents/' + GH_FILE,
-        {
-            method: 'PUT',
-            headers: Object.assign({ 'Content-Type': 'application/json' }, ghHeaders()),
-            body: JSON.stringify(body)
+// 调一次接口。action: hello（只校验口令）/ pull（合并后返回）/ push（合并 → 写回 → 返回）
+// 每次都把本机整份数据带上：由服务端合并，所以先点哪个按钮都不会丢数据
+async function apiRequest(action, extra) {
+    const body = Object.assign({
+        action: action,
+        key: apiKey,
+        products: products,
+        mappings: productMappings,
+        tombstones: {
+            products: productTombstones,
+            mappings: mappingTombstones
         }
-    );
+    }, extra || {});
 
-    // 版本冲突：重新读取最新版本后重试一次
-    if (res.status === 409 && !isRetry) {
-        await ghLoad();
-        return ghSave(newProducts, newMappings, message, true);
-    }
-    if (res.status === 401 || res.status === 403) {
-        ghToken = '';
-        localStorage.removeItem('ghToken');
-        throw new Error('令牌无效或已过期，请重新填写');
-    }
-    if (!res.ok) {
-        const err = await res.json().catch(function() { return {}; });
-        throw new Error(err.message || ('写入数据失败（HTTP ' + res.status + '）'));
+    let res;
+    try {
+        res = await fetch(API_BASE, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            cache: 'no-store',   // 同步必须拿最新的，不能被 HTTP 缓存糊住
+            body: JSON.stringify(body)
+        });
+    } catch (error) {
+        throw new Error('连不上数据接口，请检查网络或稍后再试');
     }
 
-    const json = await res.json();
-    ghSha = (json.content && json.content.sha) || ghSha;
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) { /* 网关出错时返回的可能是 HTML */ }
+
+    if (!json) throw new Error('接口返回异常（HTTP ' + res.status + '）');
+
+    if (res.status === 401) {
+        apiKey = '';
+        localStorage.removeItem(API_KEY_STORE);
+        throw new Error(json.message || '访问口令不正确，请重新输入');
+    }
+    if (!res.ok || json.code !== 0) {
+        throw new Error(json.message || ('操作失败（HTTP ' + res.status + '）'));
+    }
+
+    applyRemoteConfig(json.data && json.data.config);
     return json;
 }
 
-/* ===================== 4. CloudBase 初始化 ===================== */
+// 云端下发的配置：临期窗口只在这一处定义，页面与服务端推送用的是同一个值
+function applyRemoteConfig(config) {
+    if (!config) return;
 
-// CloudBase SDK 有几百 KB，只在真的要用云端同步时才下载，避免拖慢首屏
-const CB_SDK_URL = 'https://static.cloudbase.net/cloudbase-js-sdk/3.9.3/cloudbase.full.js';
-let cbSdkLoading = null;
+    const days = Number(config.remindDays);
+    if (!(days > 0) || days === remindDays) return;
 
-function loadScriptOnce(src) {
-    if (cbSdkLoading) return cbSdkLoading;
-
-    cbSdkLoading = new Promise(function(resolve, reject) {
-        const script = document.createElement('script');
-        script.src = src;
-        script.onload = function() { resolve(true); };
-        script.onerror = function() {
-            cbSdkLoading = null;   // 允许下次重试
-            reject(new Error('脚本加载失败：' + src));
-        };
-        document.head.appendChild(script);
-    });
-
-    return cbSdkLoading;
+    remindDays = days;
+    // 阈值变了，列表的状态列和提醒横幅要跟着重算
+    updateProductList();
+    updateReminder();
 }
 
-async function initCloudBase() {
-    if (cloudReady) return true;
 
-    if (!ENV_ID || ENV_ID === 'your-env-id') {
-        console.warn('尚未配置 CloudBase 环境 ID，云端同步功能不可用');
-        return false;
-    }
-    if (typeof cloudbase === 'undefined') {
-        try {
-            await loadScriptOnce(CB_SDK_URL);
-        } catch (err) {
-            console.error('CloudBase SDK 加载失败:', err);
-            return false;
-        }
-    }
-    if (typeof cloudbase === 'undefined') {
-        console.error('CloudBase SDK 加载失败，云端同步不可用');
-        return false;
-    }
-
-    try {
-        const options = { env: ENV_ID };
-        if (ACCESS_KEY) options.accessKey = ACCESS_KEY;
-
-        cbApp = cloudbase.init(options);
-
-        // 匿名登录（兼容 SDK 的不同版本写法）
-        if (cbApp.auth && typeof cbApp.auth.signInAnonymously === 'function') {
-            const res = await cbApp.auth.signInAnonymously();
-            if (res && res.error) throw new Error(res.error.message || '匿名登录失败');
-        } else if (typeof cbApp.auth === 'function') {
-            await cbApp.auth({ persistence: 'local' }).anonymousAuthProvider().signIn();
-        } else {
-            throw new Error('当前 SDK 不支持匿名登录，请确认控制台已开启「匿名登录」');
-        }
-
-        cbDb = cbApp.database();
-        cloudReady = true;
-        console.log('CloudBase 初始化成功，环境：', ENV_ID);
-    } catch (error) {
-        cloudReady = false;
-        console.error('CloudBase 初始化失败:', error);
-        showToast('云端连接失败：' + (error.message || '未知错误'), '#f44336', 5000);
-    }
-    return cloudReady;
-}
-
-// 确保云端可用（未初始化则尝试初始化，并给出新手提示）
-async function ensureCloud() {
-    if (cloudReady) return true;
-
-    const ok = await initCloudBase();
-    if (!ok) {
-        alert('云端尚未连接成功。\n\n请依次检查：\n' +
-              '1. script.js 中的 ENV_ID 是否已替换为你的环境 ID\n' +
-              '2. CloudBase 控制台是否已开启「匿名登录」\n' +
-              '3. 数据库权限是否设置为「所有用户可读写」\n' +
-              '4. 网络连接是否正常');
-    }
-    return ok;
-}
-
-// 分页拉取集合的全部数据
-async function fetchAllFromCloud(collectionName) {
-    const all = [];
-    let skip = 0;
-
-    while (true) {
-        const res = await cbDb.collection(collectionName).skip(skip).limit(PAGE_SIZE).get();
-        if (res && res.code) {
-            throw new Error(res.message || ('查询失败：' + res.code));
-        }
-        const batch = (res && res.data) || [];
-        all.push.apply(all, batch);
-        if (batch.length < PAGE_SIZE) break;
-        skip += PAGE_SIZE;
-    }
-
-    return all;
-}
 
 /* ===================== 4. 页面初始化 ===================== */
-document.addEventListener('DOMContentLoaded', async function() {
+document.addEventListener('DOMContentLoaded', function() {
     initializeApp();
-
-    if (IS_GITHUB_PAGES) {
-        // GitHub Pages 版本：数据存放在 GitHub 仓库，不使用 CloudBase
-        console.log('运行于 GitHub Pages，数据存储：GitHub 仓库');
-        return;
-    }
-
-    // CloudBase 版本：初始化云端连接，再启动实时数据监听
-    await initCloudBase();
-    startRealtimeWatch();
 });
 
 function initializeApp() {
@@ -672,16 +510,7 @@ function initializeApp() {
     // 注册 PWA Service Worker：让页面可安装、断网也能打开
     registerServiceWorker();
 
-    // 顶部标出这份页面在读写哪套数据，省得以为是「数据丢了 / 变回最初版本」
-    renderStorageBadge();
-
-    // 刚用网址参数切过数据源：本机缓存里还是另一套，提醒先拉一次
-    if (storageModeFromUrl) {
-        showToast('数据源已切换为 ' + storageModeLabel() +
-                  '，建议先点「获取最新数据」', '#ff9800', 6000);
-    }
-
-    // 加载数据
+    // 加载本机缓存
     loadData();
 
     // 更新列表（顶部概览条也跟着刷，见 updateProductList 末尾）
@@ -700,24 +529,21 @@ function initializeApp() {
     } catch (error) {
         console.error('重置表单失败:', error);
     }
+
+    // 顺手问一次接口，把临期窗口天数取回来（已填过口令才问，没填过不打扰）
+    // 取不到也不影响使用：先用默认的 30 天显示，下次同步成功会再对齐一次
+    refreshConfigQuietly();
 }
 
-// 当前这份数据存在哪儿（提示文案和顶部标签共用）
-function storageModeLabel() {
-    return IS_GITHUB_PAGES ? 'GitHub 仓库' : '腾讯云开发数据库';
-}
+// 静默取一次云端配置（临期窗口天数）。失败不提示 —— 打开页面不该先弹个报错
+async function refreshConfigQuietly() {
+    if (!apiKey) return;
 
-// 页面标题下挂一个小标签，明示此刻读写的是哪套数据：
-// 同一个页面部署在 GitHub Pages 和腾讯云两处，各自连的数据并不相同，
-// 没有这个标签很容易把「另一套数据」误会成数据丢失或同步失败
-function renderStorageBadge() {
-    const header = document.querySelector('header');
-    if (!header || header.querySelector('.storage-badge')) return;
-
-    const badge = document.createElement('span');
-    badge.className = 'storage-badge';
-    badge.textContent = '数据源：' + storageModeLabel();
-    header.appendChild(badge);
+    try {
+        await apiRequest('hello');
+    } catch (error) {
+        console.warn('获取云端配置失败（不影响本地使用）:', error.message || error);
+    }
 }
 
 function bindEventListeners() {
@@ -1218,45 +1044,19 @@ function toggleHandledFilter() {
 }
 
 // 距离到期还有多少天（按本地日历日算：今天到期是 0，昨天到期是 -1）
+// 实现已经抽到 shared/dates.js，这里只是保留原来的名字
 function getDaysLeft(validity) {
-    const expiry = parseDateLocal(validity);
-    if (!expiry) return null;
-
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    return Math.round((expiry - today) / 86400000);
+    return daysLeft(validity);
 }
 
-// 获取到期状态
+// 获取到期状态。阈值来自接口下发的 remindDays（见 applyRemoteConfig），
+// 不再是写死在页面里的 30 —— 否则会出现「页面标红说紧急、微信推送却没提」这种对不上的情况
 function getExpiryStatus(validity) {
-    const days = getDaysLeft(validity);
-    if (days === null) return 'unknown';   // 没填有效期，不能当成“正常”
-    if (days < 0) return 'expired';
-    if (days <= 30) return 'danger';
-    if (days <= 90) return 'warning';
-    return 'normal';
+    return getExpiryStatusFor(validity, remindDays);
 }
 
-// 获取状态文本
-function getStatusText(status) {
-    const statusMap = {
-        normal: '正常',
-        warning: '1-3个月',
-        danger: '1个月内',
-        expired: '已过期',
-        unknown: '无有效期'
-    };
-    return statusMap[status] || status;
-}
-
-// 列表状态列用的短标签：直接写“还剩几天”，比“1个月内”更直观
-function getStatusLabel(validity) {
-    const days = getDaysLeft(validity);
-    if (days === null) return '未填有效期';
-    if (days < 0) return '过期' + Math.abs(days) + '天';
-    if (days === 0) return '今天到期';
-    return '剩' + days + '天';
-}
+// 说明：getStatusText / getStatusLabel 直接来自 shared/dates.js（见文件顶部挂载），
+// 页面原来那两份实现已经删掉，改成三处（页面 / 两个云函数）共用同一份
 
 /* ===================== 6.1 到期提醒 ===================== */
 
@@ -1727,11 +1527,9 @@ window.deleteMapping = function(id) {
 };
 
 /* ===================== 8. CSV 导入导出 ===================== */
-// CSV 单元格转义：内部引号加倍，否则商品名里带逗号会把列冲错
-function csvCell(value) {
-    const text = value === undefined || value === null ? '' : String(value);
-    return '"' + text.replace(/"/g, '""') + '"';
-}
+// CSV 的拼装与解析都在 shared/csv.js（有测试覆盖，云函数也用同一份）；
+// 这里只负责下载、读取文件、并回本地数据。
+// 处置相关的 3 列追加在最后：导入时按位置读前 8 列，所以老备份文件依然能导入。
 
 // 导出CSV（商品 + 映射，导出文件本身就是一份完整备份）
 function exportToCSV() {
@@ -1740,39 +1538,11 @@ function exportToCSV() {
         return;
     }
 
-    // 处置相关的 3 列追加在最后：导入时按位置读前 8 列，追加不会破坏老文件的兼容性
-    const headers = ['类型', '商品条码', '商品名称', '扫描日期', '有效期', '生产日期', '保质期', '状态',
-                     '处置方式', '处置日期', '处置备注'];
-    const rows = [];
-
-    products.forEach(function(product) {
-        const shelfLife = formatShelfLife(product);
-        rows.push([
-            product.type || '商品',
-            product.barcode,
-            product.productName,
-            product.scanDate,
-            product.validity,
-            product.productionDate || '',
-            shelfLife === '-' ? '' : shelfLife,
-            getStatusText(getExpiryStatus(product.validity)),
-            product.handledAction || '',
-            product.handledAt || '',
-            product.handledNote || ''
-        ]);
+    const csvContent = buildCsvText(products, productMappings, {
+        getStatusText: getStatusText,
+        getExpiryStatus: getExpiryStatus,
+        formatShelfLife: formatShelfLife
     });
-
-    // 映射也一起导出，否则换台设备映射就全丢了
-    productMappings.forEach(function(mapping) {
-        rows.push(['映射', mapping.barcode, mapping.productName, '', '', '', '', '', '', '', '']);
-    });
-
-    const csvContent = [
-        headers.join(','),
-        ...rows.map(function(row) {
-            return row.map(csvCell).join(',');
-        })
-    ].join('\n');
 
     // 前面加 UTF-8 BOM（0xFEFF），否则 Excel 打开中文会乱码
     const blob = new Blob([String.fromCharCode(65279) + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -1789,146 +1559,39 @@ function exportToCSV() {
     URL.revokeObjectURL(url);
 }
 
-// 解析CSV文本：正确处理引号包裹、引号内的逗号和换行
-function parseCsvText(text) {
-    const QUOTE = 34;   // "
-    const COMMA = 44;   // ,
-    const LF = 10;      // 换行
-    const CR = 13;      // 回车
-
-    const rows = [];
-    let row = [];
-    let field = '';
-    let inQuotes = false;
-
-    for (let i = 0; i < text.length; i++) {
-        const code = text.charCodeAt(i);
-
-        if (inQuotes) {
-            if (code === QUOTE) {
-                if (text.charCodeAt(i + 1) === QUOTE) { field += '"'; i++; }
-                else inQuotes = false;
-            } else {
-                field += text[i];
-            }
-        } else if (code === QUOTE) {
-            inQuotes = true;
-        } else if (code === COMMA) {
-            row.push(field); field = '';
-        } else if (code === LF) {
-            row.push(field); rows.push(row); row = []; field = '';
-        } else if (code !== CR) {
-            field += text[i];
-        }
-    }
-
-    if (field !== '' || row.length > 0) {
-        row.push(field);
-        rows.push(row);
-    }
-
-    return rows.filter(function(r) {
-        return r.some(function(c) { return String(c).trim() !== ''; });
-    });
-}
-
-// 去掉文件开头的 BOM，否则第一列“类型”识别不出来
-function stripBom(text) {
-    return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
-}
-
-// 把“7天”“12个月”“3年”“12”这样的保质期文本拆成 数量 + 单位
-function parseShelfLifeText(text) {
-    const raw = String(text || '').trim();
-    const m = /^(\d+(?:\.\d+)?)\s*(天|日|周|个月|月|年)?/.exec(raw);
-    if (!m) return { shelfLife: '', shelfLifeUnit: '月' };
-
-    let value = Number(m[1]);
-    let unit = m[2] || '月';
-    if (unit === '日') unit = '天';
-    if (unit === '周') { unit = '天'; value = value * 7; }
-    if (unit === '个月') unit = '月';
-
-    return { shelfLife: String(parseInt(value, 10)), shelfLifeUnit: unit };
-}
-
 // 导入CSV
+// 解析交给 shared/csv.js（引号、逗号、换行、BOM、老 8 列文件都在那边处理）
 function importFromCSV(e) {
     const file = e.target.files[0];
     if (!file) return;
 
     const reader = new FileReader();
     reader.onload = function(event) {
-        const csvContent = stripBom(String(event.target.result || ''));
-        const rows = parseCsvText(csvContent);
+        const rows = parseCsvText(stripBom(String(event.target.result || '')));
 
         if (rows.length < 2) {
             alert('CSV文件格式不正确！');
             return;
         }
 
-        let productCount = 0;
-        let mappingCount = 0;
+        const parsed = csvRowsToRecords(rows, { makeUid: makeUid, todayLocal: todayLocal });
 
-        // 跳过表头，顺序：类型、商品条码、商品名称、扫描日期、有效期、生产日期、保质期、状态、处置方式、处置日期、处置备注
-        for (let i = 1; i < rows.length; i++) {
-            const row = rows[i];
-            const type = (row[0] || '').trim();
-            const barcode = (row[1] || '').trim();
-            const productName = (row[2] || '').trim();
+        // 商品并入本地：导入的记录带 uid 和更新时间，同步时按新旧正常合并
+        products = products.concat(parsed.products);
 
-            if (!barcode) continue;
-
-            if (type === '商品') {
-                const shelf = parseShelfLifeText(row[6]);
-
-                // 处置信息在最后 3 列。老备份文件没有这几列，读出来是空，按未处理处理
-                const handledAction = (row[8] || '').trim();
-                let handledAt = (row[9] || '').trim();
-                // 只有处置方式、没有日期时补今天；不然 handledAt 为空会被当成未处理，进不了已处理列表
-                if (handledAction && !handledAt) handledAt = todayLocal();
-
-                products.push({
-                    uid: makeUid(),      // 导入的记录也要有 uid，否则同步时无法与云端一一对应
-                    id: Date.now() + i,
-                    type: '商品',
-                    barcode: barcode,
-                    productName: productName,
-                    scanDate: (row[3] || '').trim(),
-                    validity: (row[4] || '').trim(),
-                    productionDate: (row[5] || '').trim(),
-                    shelfLife: shelf.shelfLife,
-                    shelfLifeUnit: shelf.shelfLifeUnit,
-                    handledAction: handledAction,
-                    handledAt: handledAt,
-                    handledNote: (row[10] || '').trim(),
-                    updatedAt: new Date().toISOString(),   // 导入 = 本机此刻改过，合并时按它算新旧
-                    createdAt: new Date().toISOString()
-                });
-                productCount++;
-            } else if (type === '映射') {
-                const mapping = {
-                    id: Date.now() + i + 1000,   // 确保ID与商品不冲突
-                    barcode: barcode,
-                    productName: productName,
-                    updatedAt: new Date().toISOString()
-                };
-                const existingIndex = productMappings.findIndex(function(m) { return m.barcode === barcode; });
-                if (existingIndex >= 0) {
-                    productMappings[existingIndex] = mapping;
-                } else {
-                    productMappings.push(mapping);
-                }
-                mappingCount++;
-            }
-        }
+        // 映射按条码唯一：同一个条码在文件里重复出现时以最后一条为准
+        parsed.mappings.forEach(function(mapping) {
+            const at = productMappings.findIndex(function(m) { return m.barcode === mapping.barcode; });
+            if (at >= 0) productMappings[at] = mapping;
+            else productMappings.push(mapping);
+        });
 
         saveProducts();
         saveMappings();
         updateProductList();
         updateMappingList();
 
-        alert('成功导入 ' + productCount + ' 条商品记录和 ' + mappingCount + ' 条映射记录！');
+        alert('成功导入 ' + parsed.productCount + ' 条商品记录和 ' + parsed.mappingCount + ' 条映射记录！');
     };
 
     reader.readAsText(file, 'UTF-8');
@@ -2010,407 +1673,19 @@ function loadData() {
     }
 }
 
-/* ===================== 9.5 记录唯一标识 ===================== */
 
-// 商品用 uid 做唯一标识。
-// 以前拿「条码」当唯一键，同一箱牛奶这周和下月各买一次（条码相同、生产日期不同），
-// 同步时后录入的会把前一条覆盖掉，云端和本地一起少一条数据。
-function makeUid() {
-    return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
-}
+/* ===================== 10. 数据同步 ===================== */
+// 两个按钮的分工（合并都在服务端做，所以两边都不会丢数据）：
+//   · 同步数据   —— 把本机改动上传：服务端先与云端合并，再写回，不会覆盖别的设备的改动
+//   · 获取最新数据 —— 只读云端并合并回本机，不动云端；本机没上传的改动会给你提个醒
+// 以前还要在这里自己合并（几百行），现在共用 shared/merge.js，云函数那份是权威实现。
 
-// 老记录的指纹：条码 + 生产日期。用来判断「云端的这条」和「本地的这条」是不是同一样东西
-function productFingerprint(product) {
-    return String(product.barcode || '') + '\u0001' + String(product.productionDate || '');
-}
-
-// 给缺 uid 的记录补 uid；uidIndex 能查到同款记录时优先沿用它的 uid，避免迁移时凭空多出一条
-function ensureProductUids(list, uidIndex) {
-    return (list || []).map(function(product) {
-        if (!product.uid) {
-            const fingerprint = productFingerprint(product);
-            product.uid = (uidIndex && uidIndex[fingerprint]) || makeUid();
-        }
-        return product;
-    });
-}
-
-// 本地记录按指纹建索引：指纹 -> uid
-function buildUidIndex(list) {
-    const index = {};
-    (list || []).forEach(function(product) {
-        if (product.uid) index[productFingerprint(product)] = product.uid;
-    });
-    return index;
-}
-
-/* ---- 删除标记（墓碑） ---- */
-// 判断一条记录是「活记录」还是「删除标记」
-function isTombstone(record) {
-    return !!(record && record.deletedAt);
-}
-
-// 商品墓碑：留着条码和生产日期，因为云端还挂着没 uid 的老记录时，
-// 只能靠「条码 + 生产日期」这个指纹把它认出来（见 mergeProducts）
-function makeProductTombstone(product, deletedAt) {
-    return {
-        uid: product.uid || '',
-        barcode: product.barcode || '',
-        productName: product.productName || '',
-        productionDate: product.productionDate || '',
-        deletedAt: deletedAt,
-        updatedAt: deletedAt
-    };
-}
-
-// 映射墓碑：映射按条码唯一，有条码就够了
-function makeMappingTombstone(mapping, deletedAt) {
-    return {
-        barcode: mapping.barcode || '',
-        productName: mapping.productName || '',
-        deletedAt: deletedAt,
-        updatedAt: deletedAt
-    };
-}
-
-/* ---- 记录的最后修改时间：跨设备同步靠它判断「哪份更新」 ---- */
-// 记录被改动时打一次时间戳。新增、编辑、标记处置、撤销处置、改名、导入都要调。
-function touchRecord(record) {
-    if (record) record.updatedAt = new Date().toISOString();
-    return record;
-}
-
-// 取记录的最后修改时间（毫秒）。没有 updatedAt 的老记录用 handledAt 兜底：
-// 标记过处置的老记录，至少是在那一天之后才变成现在这样的；从没被动过的算 0。
-//
-// 这条兜底不能省 —— 存量数据全是老格式，少了它老记录之间就没法比新旧，
-// 只能退回「一边通吃」，又回到「换设备看不到已处理」那个坑里。
-function recordModifiedTime(record) {
-    if (!record) return 0;
-
-    const updated = Date.parse(record.updatedAt);
-    if (!isNaN(updated)) return updated;
-
-    // 墓碑万一没有 updatedAt，至少要按删除时间算
-    const deleted = Date.parse(record.deletedAt);
-    if (!isNaN(deleted)) return deleted;
-
-    const handled = Date.parse(record.handledAt);
-    return isNaN(handled) ? 0 : handled;
-}
-
-// 统计 listB 里有、listA 里没有的记录条数（按 key 比）。只为提示里的「新增/删除」计数
-function countOnlyIn(listA, listB, key) {
-    const keys = {};
-    (listA || []).forEach(function(item) {
-        if (item) keys[String(item[key])] = true;
-    });
-    return (listB || []).filter(function(item) {
-        return item && !keys[String(item[key])];
-    }).length;
-}
-
-// 同一条记录两边都有时，取最后修改时间更晚的那条。
-// 只有时间完全相同（或两边都取不到时间）才用 preferLocal 决定：
-//   preferLocal = true  → 同步（推送）方向：本机优先
-//   preferLocal = false → 获取最新数据（拉取）方向：云端优先
-function pickNewerRecord(cloudRecord, localRecord, preferLocal) {
-    const cloudTime = recordModifiedTime(cloudRecord);
-    const localTime = recordModifiedTime(localRecord);
-
-    if (cloudTime === localTime) return preferLocal ? localRecord : cloudRecord;
-    return cloudTime > localTime ? cloudRecord : localRecord;
-}
-
-// 按 uid 合并商品，返回 { products, tombstones }：
-//   products   —— 活记录，同 uid 的冲突逐条比最后修改时间，谁新用谁
-//   tombstones —— 生效的删除标记，两边都留着，下次同步继续压制别的设备手里的旧副本
-//
-// 云端那份里混着墓碑（带 deletedAt），先拆开。删除与「删完又改」的判定：
-//   · 墓碑更新 → 记录被删掉，别的设备手里的旧副本也一并消失
-//   · 记录更新 → 这条在别处被改过，以改动为准，墓碑作废（删完还能救回来）
-// 加上原有的「谁新谁赢」，推送和拉取两个方向都不会丢数据，
-// 先点「同步」还是先点「获取最新数据」都不影响结果。
-// preferLocal 只在时间打平时起作用（两边都没动过、内容却不一样）。
-function mergeProducts(cloudList, localList, localTombstones, preferLocal) {
-    // 云端列表里混着墓碑，先按 deletedAt 拆开
-    const cloudLive = [];
-    const cloudTombstones = [];
-    (cloudList || []).forEach(function(record) {
-        if (!record) return;
-        (isTombstone(record) ? cloudTombstones : cloudLive).push(record);
-    });
-
-    // 必须先给本地记录补齐 uid，再按指纹建索引。
-    // 否则本地记录恰好都没 uid 时，云端的老记录匹配不到、会被当成新记录重复插入。
-    const localWithUid = ensureProductUids(localList, null);
-    const uidIndex = buildUidIndex(localWithUid);
-    const cloudWithUid = ensureProductUids(cloudLive, uidIndex);
-
-    // 1. 活记录：云端那份先铺底，输出顺序就稳定，同步前后列表不会莫名重排
-    const liveByUid = new Map();
-    const cloudByUid = new Map();           // 云端：uid → 记录
-    const cloudByFingerprint = new Map();   // 云端：条码 + 生产日期 → 记录
-    const cloudByBarcode = new Map();       // 云端：条码 → 记录（有一边缺生产日期时的兜底）
-
-    function pushIndex(index, key, record) {
-        const bucket = index.get(key);
-        if (bucket) bucket.push(record);
-        else index.set(key, [record]);
-    }
-
-    cloudWithUid.forEach(function(product) {
-        liveByUid.set(String(product.uid), product);
-        cloudByUid.set(String(product.uid), product);
-        pushIndex(cloudByFingerprint, productFingerprint(product), product);
-        pushIndex(cloudByBarcode, String(product.barcode || ''), product);
-    });
-
-    // 已经配过对的云端记录，不能再被本机另一条认领
-    const claimedUids = new Set();
-
-    // uid 对不上时（同一件东西在两台设备上各自补过一个 uid）退回按内容认领：
-    // 先比「条码 + 生产日期」，有一边没记生产日期时再退一步只比条码。
-    // 少了这一步，另一台设备点「获取最新数据」会看到整份列表翻倍，
-    // 而且本机这条（例如刚标记的「已处理」）和云端那条被算成两件东西
-    function claimCloudRecord(product) {
-        // 没有条码就没法可靠判断是不是同一条（空指纹会把一堆无关记录串在一起），只按 uid 区分
-        if (!product.barcode) return null;
-
-        const byFingerprint = cloudByFingerprint.get(productFingerprint(product)) || [];
-        // 两边都写了生产日期时，日期不同就是不同批次，不能算同一条
-        const byBarcode = (cloudByBarcode.get(String(product.barcode)) || [])
-            .filter(function(record) {
-                return !product.productionDate || !record.productionDate;
-            });
-
-        const candidates = byFingerprint.concat(byBarcode);
-        for (let i = 0; i < candidates.length; i++) {
-            const key = String(candidates[i].uid);
-            if (!claimedUids.has(key)) {
-                claimedUids.add(key);
-                return candidates[i];
-            }
-        }
-        return null;
-    }
-
-    localWithUid.forEach(function(product) {
-        const key = String(product.uid);
-        const byUid = cloudByUid.get(key);
-
-        if (byUid) {
-            claimedUids.add(key);
-            liveByUid.set(key, pickNewerRecord(byUid, product, preferLocal));
-            return;
-        }
-
-        const claimed = claimCloudRecord(product);
-        if (claimed) {
-            // 身份沿用云端那条：下次同步两边才认得出是同一条，不会再各留一份
-            const winner = pickNewerRecord(claimed, product, preferLocal);
-            winner.uid = claimed.uid;
-            liveByUid.set(String(claimed.uid), winner);
-            return;
-        }
-
-        // 只在本机存在、云端没有的记录，原样留下，下次同步会推上去
-        liveByUid.set(key, product);
-    });
-
-    // 2. 兜底去重：条码 + 生产日期相同的记录只留最近改过的一条。
-    // 本机列表如果已经被「uid 不一致」撑成了两份，这一步顺手收敛回一条，不用手工删重复
-    const deduped = [];
-    const fingerprintIndex = new Map();
-
-    liveByUid.forEach(function(product) {
-        // 没有条码就没法可靠判断是不是同一条，只按 uid 区分
-        const fingerprint = product.barcode
-            ? productFingerprint(product)
-            : 'uid\u0001' + String(product.uid);
-        const at = fingerprintIndex.get(fingerprint);
-
-        if (at === undefined) {
-            fingerprintIndex.set(fingerprint, deduped.length);
-            deduped.push(product);
-            return;
-        }
-
-        const kept = deduped[at];
-        const winner = pickNewerRecord(kept, product, preferLocal);
-
-        // 内容可以换成更新的那份，身份要留住云端已经写下的那个 uid，
-        // 否则别的设备手里那份又会对不上、重新分裂成两条
-        if (String(kept.uid) !== String(product.uid)) {
-            if (cloudByUid.has(String(kept.uid))) winner.uid = kept.uid;
-            else if (cloudByUid.has(String(product.uid))) winner.uid = product.uid;
-        }
-
-        deduped[at] = winner;
-    });
-
-    // 3. 墓碑：同一件东西两边可能各留过一条（删了又删），取时间最新的那条
-    const tombByKey = new Map();
-
-    function rememberTombstone(tombstone) {
-        if (!tombstone || !tombstone.barcode) return;
-
-        const key = tombstone.uid ? 'u' + tombstone.uid : 'f' + productFingerprint(tombstone);
-        const existing = tombByKey.get(key);
-        if (!existing || recordModifiedTime(tombstone) > recordModifiedTime(existing)) {
-            tombByKey.set(key, tombstone);
-        }
-    }
-
-    cloudTombstones.forEach(rememberTombstone);
-    (localTombstones || []).forEach(rememberTombstone);
-
-    // 4. 墓碑与活记录对账
-    const finalByUid = new Map();
-    const liveByFingerprint = new Map();
-    deduped.forEach(function(product) {
-        finalByUid.set(String(product.uid), product);
-        liveByFingerprint.set(productFingerprint(product), product);
-    });
-
-    const deletedUids = new Set();
-    const tombstones = [];
-
-    tombByKey.forEach(function(tombstone) {
-        // 优先按 uid 找；云端还挂着没 uid 的老记录时，靠「条码 + 生产日期」认领
-        let target = tombstone.uid ? finalByUid.get(String(tombstone.uid)) : null;
-        if (!target) target = liveByFingerprint.get(productFingerprint(tombstone));
-
-        if (target && recordModifiedTime(target) > recordModifiedTime(tombstone)) {
-            return;   // 删掉之后又在别处改过 → 以改动为准，墓碑作废
-        }
-        if (target) deletedUids.add(String(target.uid));
-        tombstones.push(tombstone);
-    });
-
-    return {
-        products: deduped.filter(function(product) {
-            return !deletedUids.has(String(product.uid));
-        }),
-        tombstones: tombstones
-    };
-}
-
-// 映射按条码合并：一个条码本来就只该对应一个名称，这里特意不用 uid。
-// 冲突判定与 mergeProducts 一致（先比修改时间，打平才看 preferLocal），同样返回墓碑
-function mergeMappings(cloudList, localList, localTombstones, preferLocal) {
-    const cloudLive = [];
-    const cloudTombstones = [];
-
-    (cloudList || []).forEach(function(record) {
-        if (!record || !record.barcode) return;
-        (isTombstone(record) ? cloudTombstones : cloudLive).push(record);
-    });
-
-    const liveByBarcode = new Map();
-    cloudLive.forEach(function(mapping) {
-        liveByBarcode.set(String(mapping.barcode), mapping);
-    });
-
-    (localList || []).forEach(function(mapping) {
-        if (!mapping || !mapping.barcode) return;
-
-        const key = String(mapping.barcode);
-        const cloudRecord = liveByBarcode.get(key);
-        liveByBarcode.set(key, cloudRecord ? pickNewerRecord(cloudRecord, mapping, preferLocal) : mapping);
-    });
-
-    const tombByBarcode = new Map();
-
-    function rememberTombstone(tombstone) {
-        if (!tombstone || !tombstone.barcode) return;
-
-        const key = String(tombstone.barcode);
-        const existing = tombByBarcode.get(key);
-        if (!existing || recordModifiedTime(tombstone) > recordModifiedTime(existing)) {
-            tombByBarcode.set(key, tombstone);
-        }
-    }
-
-    cloudTombstones.forEach(rememberTombstone);
-    (localTombstones || []).forEach(rememberTombstone);
-
-    const deletedBarcodes = new Set();
-    const tombstones = [];
-
-    tombByBarcode.forEach(function(tombstone) {
-        const target = liveByBarcode.get(String(tombstone.barcode));
-        if (target && recordModifiedTime(target) > recordModifiedTime(tombstone)) {
-            return;   // 删掉之后又改过 → 以改动为准，墓碑作废
-        }
-        if (target) deletedBarcodes.add(String(target.barcode));
-        tombstones.push(tombstone);
-    });
-
-    return {
-        mappings: Array.from(liveByBarcode.values()).filter(function(mapping) {
-            return !deletedBarcodes.has(String(mapping.barcode));
-        }),
-        tombstones: tombstones
-    };
-}
-
-/* ---- 云端文档 → 本地记录 ---- */
-// 字段清单必须和 upsertCollection 的白名单一致，
-// 漏一个就会出现「同步后处置状态 / 修改时间丢了」
-function cloudDocToProduct(doc) {
-    return {
-        id: doc.uid || doc._id,      // 兼容旧字段
-        uid: doc.uid || '',          // 空 uid 会在合并时补上，下次同步回填云端
-        barcode: doc.barcode,
-        productName: doc.productName,
-        type: doc.type || '商品',
-        scanDate: doc.scanDate || '',
-        productionDate: doc.productionDate || '',
-        shelfLife: doc.shelfLife || '',
-        shelfLifeUnit: doc.shelfLifeUnit || '月',
-        validity: doc.validity || '',
-        handledAction: doc.handledAction || '',
-        handledAt: doc.handledAt || '',
-        handledNote: doc.handledNote || '',
-        updatedAt: doc.updatedAt || '',   // 缺了它就只能退回 handledAt 兜底
-        deletedAt: doc.deletedAt || '',   // 有值 = 这条是删除标记（墓碑），不是活记录
-        createdAt: doc._createTime
-            ? new Date(doc._createTime).toISOString()
-            : new Date().toISOString()
-    };
-}
-
-function cloudDocToMapping(doc) {
-    return {
-        id: doc._id,
-        barcode: doc.barcode,
-        productName: doc.productName,
-        updatedAt: doc.updatedAt || '',
-        deletedAt: doc.deletedAt || ''   // 有值 = 删除标记（墓碑）
-    };
-}
-
-/* ===================== 10. 云端同步 ===================== */
-
-// GitHub 存储：与云端对账后写回，并让本机收敛到合并结果。
-// 「同步数据」按钮和「删除后静默推送」共用这一段。
-async function saveMergedToGithub(cloud, message) {
-    const mergedProducts = mergeProducts(cloud.products, products, productTombstones, true);
-    const mergedMappings = mergeMappings(cloud.mappings, productMappings, mappingTombstones, true);
-
-    // 墓碑以「带 deletedAt 的记录」的形式和活记录一起写进 data.json：
-    // 不另开一段存储，别的设备一读就知道这条是被删掉的
-    await ghSave(
-        mergedProducts.products.concat(mergedProducts.tombstones),
-        mergedMappings.mappings.concat(mergedMappings.tombstones),
-        message
-    );
-
-    products = mergedProducts.products;
-    productTombstones = mergedProducts.tombstones;
-    productMappings = mergedMappings.mappings;
-    mappingTombstones = mergedMappings.tombstones;
+// 把服务端返回的合并结果落到本机
+function applyMergedData(data) {
+    products = data.products || [];
+    productMappings = data.mappings || [];
+    productTombstones = (data.tombstones && data.tombstones.products) || [];
+    mappingTombstones = (data.tombstones && data.tombstones.mappings) || [];
 
     saveProducts();
     saveMappings();
@@ -2418,415 +1693,103 @@ async function saveMergedToGithub(cloud, message) {
     updateProductList();
     updateMappingList();
     updateReminder();
-
-    return { productCount: products.length, mappingCount: productMappings.length };
 }
 
-// 删除后立刻把墓碑推上云端，不用等用户再点一次「同步」。
-// 推不上去也不回滚：本机已经删掉了，下次点「同步」会把墓碑补上去
-async function pushTombstonesQuietly() {
-    try {
-        if (IS_GITHUB_PAGES) {
-            if (!ghToken) return;   // 还没填令牌，等点「同步」时一起走
-            const cloud = await ghLoad();
-            await saveMergedToGithub(cloud, '删除记录');
-            return;
-        }
-
-        if (!cloudReady) return;   // 云端没连上，等点「同步」时一起走
-
-        // 墓碑就是「带 deletedAt 的文档」，按 uid / 条码 upsert 到同一个集合里
-        await upsertCollection(PRODUCT_COLLECTION, productTombstones, null);
-        await upsertCollection(MAPPING_COLLECTION, mappingTombstones, null);
-    } catch (error) {
-        console.error('删除标记推送云端失败:', error);
-        showToast('已在本机删除；推送云端失败，下次点「同步」会补上', '#ff9800', 5000);
-    }
+// 记下同步前的条数，用来算「新增 / 删除」给提示用
+function snapshotCounts() {
+    return {
+        products: products.length,
+        mappings: productMappings.length
+    };
 }
 
-// 同步本地数据到云端（按 uid 匹配：有则更新，无则新增）
+function diffSummary(before) {
+    return {
+        productAdded: Math.max(0, products.length - before.products),
+        productRemoved: Math.max(0, before.products - products.length),
+        mappingAdded: Math.max(0, productMappings.length - before.mappings),
+        mappingRemoved: Math.max(0, before.mappings - productMappings.length)
+    };
+}
+
+function describeDiff(summary) {
+    return '（新增 ' + summary.productAdded + '，减少 ' + summary.productRemoved + '）';
+}
+
+// 「同步数据」：上传本机改动
 async function syncData() {
-    /* ---- GitHub 存储：本地与云端合并后写回 ---- */
-    if (IS_GITHUB_PAGES) {
-        if (!await ensureGhToken()) return;
+    if (!await ensureApiKey()) return;
 
-        // 只剩墓碑也要同步：本机删空之后，「删除」这件事本身得推到云端
-        const localCount = products.length + productMappings.length +
-                           productTombstones.length + mappingTombstones.length;
-        if (localCount === 0) {
-            alert('没有数据需要同步！');
-            return;
-        }
-
-        showToast('正在同步数据到 GitHub ...', '#4CAF50', 60000);
-
-        try {
-            const cloud = await ghLoad();
-
-            // 商品按 uid 合并（同一条码的不同批次不再互相覆盖），映射按条码合并。
-            // 逐条比最后修改时间：本机改得更晚的推上去，云端更新的留在云端，
-            // 墓碑同样参与比时间，删掉的东西不会被别的设备带回来
-            const result = await saveMergedToGithub(cloud, '同步商品数据');
-
-            showToast('同步完成：商品 ' + result.productCount + ' 条', '#45a049', 5000);
-            alert('数据同步完成！\n商品: ' + result.productCount + ' 条\n映射: ' + result.mappingCount + ' 条');
-        } catch (error) {
-            console.error('GitHub 同步失败:', error);
-            showToast('同步失败：' + (error.message || '未知错误'), '#f44336', 5000);
-            alert('数据同步失败：' + (error.message || '未知错误'));
-        }
-        return;
-    }
-
-    if (!await ensureCloud()) return;
-
-    const totalItems = products.length + productMappings.length +
+    // 只剩墓碑也要同步：本机删空之后，「删除」这件事本身得传上去
+    const localCount = products.length + productMappings.length +
                        productTombstones.length + mappingTombstones.length;
-    if (totalItems === 0) {
+    if (localCount === 0) {
         alert('没有数据需要同步！');
         return;
     }
 
-    showToast('正在同步数据到云端...', '#4CAF50', 60000);
+    showToast('正在同步数据...', '#4CAF50', 60000);
 
     try {
-        // 先把云端快照拉下来，逐条比最后修改时间再决定写什么：
-        //   · 本机是旧副本时，云端更新的记录（例如别的设备刚标记的处置）不会被覆盖掉
-        //   · 本机改得更晚的记录照常推上去，删除标记也一样
-        // 于是「先同步还是先获取」都不会丢数据，按钮顺序不再是坑
-        const cloudProductDocs = await fetchAllFromCloud(PRODUCT_COLLECTION);
-        const cloudMappingDocs = await fetchAllFromCloud(MAPPING_COLLECTION);
+        const before = snapshotCounts();
+        const res = await apiRequest('push');
+        applyMergedData(res.data);
 
-        const mergedProducts = mergeProducts(
-            cloudProductDocs.map(cloudDocToProduct), products, productTombstones, true);
-        const mergedMappings = mergeMappings(
-            cloudMappingDocs.map(cloudDocToMapping), productMappings, mappingTombstones, true);
-
-        // 墓碑跟着活记录一起写回同一个集合（就是带 deletedAt 的文档），
-        // 不用新建集合，也就不用再去 CloudBase 控制台开一次权限
-        const productResult = await upsertCollection(
-            PRODUCT_COLLECTION,
-            mergedProducts.products.concat(mergedProducts.tombstones),
-            cloudProductDocs);
-        const mappingResult = await upsertCollection(
-            MAPPING_COLLECTION,
-            mergedMappings.mappings.concat(mergedMappings.tombstones),
-            cloudMappingDocs);
-
-        // 本机也收敛到合并结果：否则界面还显示旧状态，看着像同步没生效
-        products = mergedProducts.products;
-        productTombstones = mergedProducts.tombstones;
-        productMappings = mergedMappings.mappings;
-        mappingTombstones = mergedMappings.tombstones;
-        saveProducts();
-        saveMappings();
-        saveTombstones();
-        updateProductList();
-        updateMappingList();
-        updateReminder();
-
-        const successCount = productResult.success + mappingResult.success;
-        const failCount = productResult.fail + mappingResult.fail;
-
-        showToast(
-            '数据同步完成：成功 ' + successCount + ' 项，失败 ' + failCount + ' 项',
-            failCount === 0 ? '#45a049' : '#ff9800',
-            5000
-        );
-        alert('数据同步完成！\n商品: ' + products.length + ' 条\n映射: ' + productMappings.length + ' 条\n' +
-              '写入成功: ' + successCount + ' 项' + (failCount > 0 ? '\n失败: ' + failCount + ' 项' : ''));
+        const summary = diffSummary(before);
+        showToast('同步完成：商品 ' + products.length + ' 条', '#45a049', 5000);
+        alert('数据同步完成！\n' +
+              '商品: ' + products.length + ' 条' + describeDiff(summary) + '\n' +
+              '映射: ' + productMappings.length + ' 条' +
+              (summary.mappingAdded !== summary.mappingRemoved ? '（新增 ' + summary.mappingAdded + '，减少 ' + summary.mappingRemoved + '）' : ''));
     } catch (error) {
-        console.error('数据同步失败:', error);
+        console.error('同步失败:', error);
         showToast('同步失败：' + (error.message || '未知错误'), '#f44336', 5000);
         alert('数据同步失败：' + (error.message || '未知错误'));
     }
 }
 
-// 把本地数组写入云端集合。
-// 商品按 uid 匹配；映射按条码匹配（一个条码本来就只该有一条映射）
-async function upsertCollection(collectionName, localItems, cloudSnapshot) {
-    const isProduct = collectionName === PRODUCT_COLLECTION;
-    // 字段清单必须和 cloudDocToProduct / cloudDocToMapping 保持一致，
-    // 漏一个就会出现「同步后处置状态 / 修改时间丢了」
-    const fields = isProduct
-        ? ['uid', 'barcode', 'productName', 'type', 'scanDate', 'productionDate', 'shelfLife', 'shelfLifeUnit', 'validity',
-           'handledAction', 'handledAt', 'handledNote', 'updatedAt', 'deletedAt']
-        : ['barcode', 'productName', 'updatedAt', 'deletedAt'];
-
-    // 1. 云端已有记录，建立「匹配键 -> _id」映射。
-    //    cloudSnapshot 是调用方刚拉过的快照，传了就直接用，不再多读一遍
-    const cloudItems = cloudSnapshot || await fetchAllFromCloud(collectionName);
-    const idByKey = {};
-    const legacyIdByBarcode = {};   // 迁移用：还没有 uid 的历史记录
-
-    cloudItems.forEach(function(doc) {
-        if (isProduct) {
-            if (doc.uid) idByKey[doc.uid] = doc._id;
-            else if (doc.barcode) legacyIdByBarcode[doc.barcode] = doc._id;
-        } else if (doc.barcode) {
-            idByKey[doc.barcode] = doc._id;
-        }
-    });
-
-    // 历史记录只能被认领一次，否则同条码的第二条又会覆盖到同一条上
-    function takeLegacyId(barcode) {
-        const id = legacyIdByBarcode[barcode];
-        if (id) delete legacyIdByBarcode[barcode];
-        return id;
-    }
-
-    // 2. 区分「需新增」和「需更新」
-    const toAdd = [];
-    const toUpdate = [];
-
-    localItems.forEach(function(item) {
-        if (item.barcode === undefined || item.barcode === null || item.barcode === '') return;
-
-        if (isProduct && !item.uid) item.uid = makeUid();
-
-        const data = {};
-        fields.forEach(function(field) {
-            data[field] = item[field] === undefined || item[field] === null ? '' : item[field];
-        });
-
-        const existedId = isProduct
-            ? (idByKey[item.uid] || takeLegacyId(item.barcode))
-            : idByKey[item.barcode];
-
-        if (existedId) {
-            toUpdate.push({ id: existedId, data: data });
-        } else {
-            toAdd.push(data);
-        }
-    });
-
-    let success = 0;
-    let fail = 0;
-
-    // 3. 批量新增（SDK 支持数组一次性写入）
-    if (toAdd.length > 0) {
-        try {
-            await cbDb.collection(collectionName).add(toAdd);
-            success += toAdd.length;
-        } catch (error) {
-            console.error('批量新增失败，改为逐条写入:', error);
-            for (let i = 0; i < toAdd.length; i++) {
-                try {
-                    await cbDb.collection(collectionName).add(toAdd[i]);
-                    success++;
-                } catch (e) {
-                    fail++;
-                    console.error('新增失败:', e);
-                }
-            }
-        }
-    }
-
-    // 4. 逐条更新（每批 20 条并发）
-    const CHUNK = 20;
-    for (let i = 0; i < toUpdate.length; i += CHUNK) {
-        const chunk = toUpdate.slice(i, i + CHUNK);
-        const results = await Promise.all(chunk.map(function(updateItem) {
-            return cbDb.collection(collectionName)
-                .doc(updateItem.id)
-                .update(updateItem.data)
-                .then(function() { return true; })
-                .catch(function(e) {
-                    console.error('更新失败:', e);
-                    return false;
-                });
-        }));
-        results.forEach(function(ok) { ok ? success++ : fail++; });
-    }
-
-    return { success: success, fail: fail };
-}
-
-// 从云端获取最新数据（与本地合并，谁新用谁）
+// 「获取最新数据」：只读云端，与本机合并；本机没上传的改动会提示手动上传
 async function fetchLatestDataFromCloud() {
-    /* ---- GitHub 存储 ---- */
-    if (IS_GITHUB_PAGES) {
-        if (!await ensureGhToken()) return;
+    if (!await ensureApiKey()) return;
 
-        showToast('正在从 GitHub 获取最新数据 ...', '#2196F3', 60000);
-
-        try {
-            const cloud = await ghLoad();
-
-            // 逐条比最后修改时间，谁新用谁：云端更新过的拉过来，本机刚改过的留着。
-            // 云端那份里的墓碑（别的设备删掉的）同样算数：
-            // 本机手里那条旧副本会在这里被删掉，而不是把云端已经删掉的记录又带回来
-            const mergedProducts = mergeProducts(cloud.products, products, productTombstones, false);
-            const mergedMappings = mergeMappings(cloud.mappings, productMappings, mappingTombstones, false);
-            const addedProducts = countOnlyIn(products, mergedProducts.products, 'uid');
-            const removedProducts = countOnlyIn(mergedProducts.products, products, 'uid');
-            const addedMappings = countOnlyIn(productMappings, mergedMappings.mappings, 'barcode');
-            const removedMappings = countOnlyIn(mergedMappings.mappings, productMappings, 'barcode');
-
-            products = mergedProducts.products;
-            productTombstones = mergedProducts.tombstones;
-            productMappings = mergedMappings.mappings;
-            mappingTombstones = mergedMappings.tombstones;
-            saveProducts();
-            saveMappings();
-            saveTombstones();
-            updateProductList();
-            updateMappingList();
-            updateReminder();
-
-            // 本机较新的改动（例如刚标记的「已处理」）一并写回云端：
-            // 只拉不推的话，本机改过的东西别的设备永远看不到
-            try {
-                await ghSave(
-                    mergedProducts.products.concat(mergedProducts.tombstones),
-                    mergedMappings.mappings.concat(mergedMappings.tombstones),
-                    '获取最新数据'
-                );
-            } catch (writeError) {
-                console.error('回写云端失败:', writeError);
-                showToast('本地已合并，但回写云端失败：' + (writeError.message || '未知错误'), '#ff9800', 5000);
-            }
-
-            showToast('获取完成：商品 ' + products.length + ' 条', '#45a049', 5000);
-            alert('已与云端数据合并（两边谁更新用谁）！\n' +
-                  '商品: ' + products.length + ' 条（新增 ' + addedProducts + '，删除 ' + removedProducts + '）\n' +
-                  '映射: ' + productMappings.length + ' 条（新增 ' + addedMappings + '，删除 ' + removedMappings + '）');
-        } catch (error) {
-            console.error('GitHub 获取数据失败:', error);
-            showToast('获取失败：' + (error.message || '未知错误'), '#f44336', 5000);
-            alert('数据获取失败：' + (error.message || '未知错误'));
-        }
-        return;
-    }
-
-    if (!await ensureCloud()) return;
-
-    showToast('正在从云端获取最新数据...', '#2196F3', 60000);
+    showToast('正在获取最新数据...', '#2196F3', 60000);
 
     try {
-        const cloudProductDocs = await fetchAllFromCloud(PRODUCT_COLLECTION);
-        const cloudMappingDocs = await fetchAllFromCloud(MAPPING_COLLECTION);
+        const before = snapshotCounts();
+        const res = await apiRequest('pull');
+        applyMergedData(res.data);
 
-        // 逐条比最后修改时间，谁新用谁：云端更新过的拉过来，本机刚改过的留着。
-        // 云端那份里的墓碑（别的设备删掉的）同样算数，本机的旧副本会被它删掉
-        const mergedProducts = mergeProducts(
-            cloudProductDocs.map(cloudDocToProduct), products, productTombstones, false);
-        const addedProducts = countOnlyIn(products, mergedProducts.products, 'uid');
-        const removedProducts = countOnlyIn(mergedProducts.products, products, 'uid');
+        const summary = diffSummary(before);
+        const stats = res.stats || {};
 
-        products = mergedProducts.products;
-        productTombstones = mergedProducts.tombstones;
-        saveProducts();
-        saveTombstones();
-        updateProductList();
-        updateReminder();
+        // 本机有、云端没有的记录（pull 不写云端），提醒一句怎么上传
+        const pending = Math.max(0, (stats.products || 0) - (stats.remoteLive || 0)) +
+                        Math.max(0, (stats.deletedProducts || 0) - (stats.remoteTombstones || 0));
 
-        const mergedMappings = mergeMappings(
-            cloudMappingDocs.map(cloudDocToMapping), productMappings, mappingTombstones, false);
-        const addedMappings = countOnlyIn(productMappings, mergedMappings.mappings, 'barcode');
-        const removedMappings = countOnlyIn(mergedMappings.mappings, productMappings, 'barcode');
-
-        productMappings = mergedMappings.mappings;
-        mappingTombstones = mergedMappings.tombstones;
-        saveMappings();
-        saveTombstones();
-        updateMappingList();
-
-        // 本机较新的改动一并写回云端（同 GitHub 分支的说明）：
-        // 只拉不推的话，本机改过的东西别的设备永远看不到
-        try {
-            await upsertCollection(
-                PRODUCT_COLLECTION, products.concat(productTombstones), cloudProductDocs);
-            await upsertCollection(
-                MAPPING_COLLECTION, productMappings.concat(mappingTombstones), cloudMappingDocs);
-        } catch (writeError) {
-            console.error('回写云端失败:', writeError);
-        }
-
-        showToast(
-            '数据获取完成：商品 ' + products.length + ' 条，映射 ' + productMappings.length + ' 条',
-            '#45a049',
-            5000
-        );
+        showToast('获取完成：商品 ' + products.length + ' 条', '#45a049', 5000);
         alert('已与云端数据合并（两边谁更新用谁）！\n' +
-              '商品: ' + products.length + ' 条（新增 ' + addedProducts + '，删除 ' + removedProducts + '）\n' +
-              '映射: ' + productMappings.length + ' 条（新增 ' + addedMappings + '，删除 ' + removedMappings + '）');
+              '商品: ' + products.length + ' 条' + describeDiff(summary) + '\n' +
+              '映射: ' + productMappings.length + ' 条' +
+              (pending > 0 ? '\n\n注意：本机有 ' + pending + ' 条改动还没上传，点「同步数据」即可上传。' : ''));
     } catch (error) {
-        console.error('获取云端数据失败:', error);
+        console.error('获取数据失败:', error);
         showToast('获取失败：' + (error.message || '未知错误'), '#f44336', 5000);
         alert('数据获取失败：' + (error.message || '未知错误'));
     }
 }
 
-/* ===================== 11. 实时数据监听 ===================== */
-function startRealtimeWatch() {
-    if (!cloudReady) {
-        console.log('云端未就绪，跳过实时数据监听');
-        return;
-    }
-
-    closeCloudWatchers();
+// 删除后立刻把墓碑推上云端，不用等用户再点一次「同步数据」。
+// 推不上去也不回滚：本机已经删掉了，下次点「同步数据」会把墓碑补上
+async function pushTombstonesQuietly() {
+    if (!apiKey) return;   // 还没填过口令，等点「同步数据」时一起走
 
     try {
-        // 监听商品集合
-        const productWatcher = cbDb.collection(PRODUCT_COLLECTION).watch({
-            onChange: function(snapshot) {
-                if (!snapshot || snapshot.type === 'init') return;
-                (snapshot.docChanges || []).forEach(function(change) {
-                    const doc = change.doc || {};
-                    const label = doc.productName || doc.barcode || '';
-                    if (change.dataType === 'add') {
-                        showToast('新商品添加：' + label, '#2196F3');
-                    } else if (change.dataType === 'update') {
-                        showToast('商品更新：' + label, '#2196F3');
-                    } else if (change.dataType === 'remove') {
-                        showToast('云端有商品被删除', '#ff9800');
-                    }
-                });
-            },
-            onError: function(error) {
-                console.error('商品实时监听错误:', error);
-            }
-        });
-        cloudWatchers.push(productWatcher);
-
-        // 监听映射集合
-        const mappingWatcher = cbDb.collection(MAPPING_COLLECTION).watch({
-            onChange: function(snapshot) {
-                if (!snapshot || snapshot.type === 'init') return;
-                (snapshot.docChanges || []).forEach(function(change) {
-                    const doc = change.doc || {};
-                    if (change.dataType === 'add') {
-                        showToast('新映射添加：' + (doc.barcode || ''), '#2196F3');
-                    } else if (change.dataType === 'update') {
-                        showToast('映射更新：' + (doc.barcode || ''), '#2196F3');
-                    } else if (change.dataType === 'remove') {
-                        showToast('云端有映射被删除', '#ff9800');
-                    }
-                });
-            },
-            onError: function(error) {
-                console.error('映射实时监听错误:', error);
-            }
-        });
-        cloudWatchers.push(mappingWatcher);
-
-        console.log('实时数据监听已启动');
+        const res = await apiRequest('push');
+        applyMergedData(res.data);
     } catch (error) {
-        console.error('初始化实时数据监听失败:', error);
+        console.error('删除标记上传失败:', error);
+        showToast('已在本机删除；上传失败，下次点「同步数据」会补上', '#ff9800', 5000);
     }
-}
-
-// 关闭全部实时监听
-function closeCloudWatchers() {
-    cloudWatchers.forEach(function(watcher) {
-        try {
-            watcher.close();
-        } catch (e) {
-            // 忽略关闭异常
-        }
-    });
-    cloudWatchers = [];
 }
 
 // ===================== PWA：Service Worker 与「安装 / 添加到桌面」 =====================

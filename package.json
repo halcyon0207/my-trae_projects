@@ -1,0 +1,12 @@
+{
+  "name": "product-expiry-reminder",
+  "version": "2.0.0",
+  "private": true,
+  "description": "商品到期提醒：扫条码记保质期，临期/过期自动推送到微信",
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\"",
+    "smoke": "node scripts/api-smoke.js",
+    "deploy": "powershell -File scripts/deploy.ps1",
+    "deploy:hosting": "powershell -File scripts/deploy.ps1 -Hosting"
+  }
+}

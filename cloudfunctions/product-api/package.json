@@ -1,0 +1,10 @@
+{
+  "name": "product-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "description": "数据读写代理：校验访问口令，读写仓库里的 data.json，合并在服务端完成",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {}
+}

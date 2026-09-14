@@ -5,6 +5,20 @@
   "functionRoot": "cloudfunctions",
   "functions": [
     {
+      "name": "product-api",
+      "runtime": "Nodejs20.19",
+      "timeout": 30,
+      "memorySize": 256,
+      "installDependency": true,
+      "handler": "index.main",
+      "description": "数据读写代理：校验访问口令，读写仓库 data.json，合并在服务端完成",
+      "envVariables": {
+        "API_KEY": "{{env.API_KEY}}",
+        "GITHUB_TOKEN": "{{env.GITHUB_TOKEN}}",
+        "REMIND_DAYS": "30"
+      }
+    },
+    {
       "name": "expire-notify",
       "runtime": "Nodejs20.19",
       "timeout": 30,
@@ -14,13 +28,17 @@
       "description": "每天定时扫商品表，过期/临期通过 PushPlus 推送到微信",
       "triggers": [
         {
-          "name": "daily-9am",
+          "name": "daily-730",
           "type": "timer",
-          "config": "0 0 9 * * * *"
+          "config": "0 30 7 * * * *"
         }
       ],
       "envVariables": {
-        "PUSHPLUS_TOKEN": ""
+        "PUSHPLUS_TOKEN": "{{env.PUSHPLUS_TOKEN}}",
+        "GITHUB_TOKEN": "{{env.GITHUB_TOKEN}}",
+        "TZ": "Asia/Shanghai",
+        "REMIND_DAYS": "30",
+        "PUSH_WHEN_EMPTY": "weekly"
       }
     }
   ]
