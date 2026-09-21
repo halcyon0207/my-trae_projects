@@ -7,8 +7,9 @@
 node_modules/
 cloudfunctions/*/node_modules/
 
-# 部署时由 scripts/deploy.ps1 从 shared/ 复制过来，唯一真身在 shared/
+# 部署时由 scripts/deploy.ps1 复制过来的产物，唯一真身在项目根目录 / shared/
 cloudfunctions/*/lib/
+cloudfunctions/site/public/
 
 # 发布静态页面时的暂存目录
 .deploy-tmp/

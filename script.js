@@ -1716,6 +1716,23 @@ function describeDiff(summary) {
     return '（新增 ' + summary.productAdded + '，减少 ' + summary.productRemoved + '）';
 }
 
+// 「同步数据」用：算这次上传给云端带来了什么。
+// 不能拿本机列表前后条数差来算 —— 本机新增的商品在同步前就已经在列表里了，
+// 那样算永远是 0。改用云函数返回的 stats：云端同步前的条数（remoteLive）
+// 和合并后的条数（products），两者之差就是本次上传新增/减少的条数
+function uploadedDiff(stats) {
+    const merged = stats.products !== undefined ? stats.products : products.length;
+    const remote = stats.remoteLive !== undefined ? stats.remoteLive : merged;
+    const mergedMappings = stats.mappings !== undefined ? stats.mappings : productMappings.length;
+    const remoteMappings = stats.remoteMappings !== undefined ? stats.remoteMappings : mergedMappings;
+    return {
+        productAdded: Math.max(0, merged - remote),
+        productRemoved: Math.max(0, remote - merged),
+        mappingAdded: Math.max(0, mergedMappings - remoteMappings),
+        mappingRemoved: Math.max(0, remoteMappings - mergedMappings)
+    };
+}
+
 // 「同步数据」：上传本机改动
 async function syncData() {
     if (!await ensureApiKey()) return;
@@ -1731,16 +1748,17 @@ async function syncData() {
     showToast('正在同步数据...', '#4CAF50', 60000);
 
     try {
-        const before = snapshotCounts();
         const res = await apiRequest('push');
         applyMergedData(res.data);
 
-        const summary = diffSummary(before);
+        // 上传提示按「给云端带来了什么」算，不看本机列表前后差（本机新增在同步前就已在列表里）
+        const summary = uploadedDiff(res.stats || {});
         showToast('同步完成：商品 ' + products.length + ' 条', '#45a049', 5000);
         alert('数据同步完成！\n' +
-              '商品: ' + products.length + ' 条' + describeDiff(summary) + '\n' +
+              '商品: ' + products.length + ' 条（上传新增 ' + summary.productAdded +
+              '，减少 ' + summary.productRemoved + '）\n' +
               '映射: ' + productMappings.length + ' 条' +
-              (summary.mappingAdded !== summary.mappingRemoved ? '（新增 ' + summary.mappingAdded + '，减少 ' + summary.mappingRemoved + '）' : ''));
+              (summary.mappingAdded !== summary.mappingRemoved ? '（上传新增 ' + summary.mappingAdded + '，减少 ' + summary.mappingRemoved + '）' : ''));
     } catch (error) {
         console.error('同步失败:', error);
         showToast('同步失败：' + (error.message || '未知错误'), '#f44336', 5000);

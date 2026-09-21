@@ -5,6 +5,18 @@
   "functionRoot": "cloudfunctions",
   "functions": [
     {
+      "name": "site",
+      "runtime": "Nodejs20.19",
+      "timeout": 10,
+      "memorySize": 128,
+      "installDependency": true,
+      "handler": "index.main",
+      "description": "页面托管：直接返回页面文件，避免静态托管默认域名强制下载",
+      "envVariables": {
+        "SITE_PREFIX": "/app"
+      }
+    },
+    {
       "name": "product-api",
       "runtime": "Nodejs20.19",
       "timeout": 30,

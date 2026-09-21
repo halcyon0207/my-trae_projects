@@ -1,0 +1,10 @@
+{
+  "name": "site",
+  "version": "1.0.0",
+  "main": "index.js",
+  "description": "页面托管：用云函数直接返回页面文件，避免静态托管默认域名强制下载的问题",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {}
+}
