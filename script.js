@@ -1305,7 +1305,7 @@ window.deleteProduct = function(id) {
 
     // 墓碑立刻推到云端，别的设备下次「获取最新数据」就能看到这条没了。
     // 推失败也无所谓：本机已经删掉了，下次点「同步」会补上
-    pushTombstonesQuietly();
+    pushTombstonesQuietly('商品删除');
 };
 
 /* ===================== 8.1 标记处理 / 撤销处理 ===================== */
@@ -1523,7 +1523,7 @@ window.deleteMapping = function(id) {
     saveTombstones();
     updateMappingList();
 
-    pushTombstonesQuietly();
+    pushTombstonesQuietly('映射删除');
 };
 
 /* ===================== 8. CSV 导入导出 ===================== */
@@ -1753,12 +1753,20 @@ async function syncData() {
 
         // 上传提示按「给云端带来了什么」算，不看本机列表前后差（本机新增在同步前就已在列表里）
         const summary = uploadedDiff(res.stats || {});
+        console.log('同步统计', res.stats, summary);
+
+        // 删除是「删掉就立刻静默上传墓碑」的，等你再点同步时云端早就删好了，
+        // 这时一律显示 0。不加这句说明，看到「减少 0」会以为删除没同步上去
+        const nothingToUpload = summary.productAdded === 0 && summary.productRemoved === 0 &&
+                                summary.mappingAdded === 0 && summary.mappingRemoved === 0;
+
         showToast('同步完成：商品 ' + products.length + ' 条', '#45a049', 5000);
         alert('数据同步完成！\n' +
               '商品: ' + products.length + ' 条（上传新增 ' + summary.productAdded +
               '，减少 ' + summary.productRemoved + '）\n' +
               '映射: ' + productMappings.length + ' 条' +
-              (summary.mappingAdded !== summary.mappingRemoved ? '（上传新增 ' + summary.mappingAdded + '，减少 ' + summary.mappingRemoved + '）' : ''));
+              (summary.mappingAdded !== summary.mappingRemoved ? '（上传新增 ' + summary.mappingAdded + '，减少 ' + summary.mappingRemoved + '）' : '') +
+              (nothingToUpload ? '\n\n本机与云端已经一致，本次没有新的改动要上传（删除是在删除时即时上传的）。' : ''));
     } catch (error) {
         console.error('同步失败:', error);
         showToast('同步失败：' + (error.message || '未知错误'), '#f44336', 5000);
@@ -1798,12 +1806,15 @@ async function fetchLatestDataFromCloud() {
 
 // 删除后立刻把墓碑推上云端，不用等用户再点一次「同步数据」。
 // 推不上去也不回滚：本机已经删掉了，下次点「同步数据」会把墓碑补上
-async function pushTombstonesQuietly() {
+async function pushTombstonesQuietly(label) {
     if (!apiKey) return;   // 还没填过口令，等点「同步数据」时一起走
 
     try {
         const res = await apiRequest('push');
         applyMergedData(res.data);
+        // 成功也要给个回执：删除是静默上传的，一声不吭的话用户不知道云端那边已经删了，
+        // 再去点「同步数据」看到「减少 0」就会以为删除没传上去
+        showToast((label || '删除') + '已同步到云端：商品 ' + products.length + ' 条', '#45a049', 4000);
     } catch (error) {
         console.error('删除标记上传失败:', error);
         showToast('已在本机删除；上传失败，下次点「同步数据」会补上', '#ff9800', 5000);
