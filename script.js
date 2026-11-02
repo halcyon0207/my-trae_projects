@@ -33,6 +33,21 @@
 const API_BASE = 'https://trae-projects-4g5aob6ufac38569-1421597865.ap-shanghai.app.tcloudbase.com/api';
 const API_KEY_STORE = 'apiKey';
 
+/* 本地预览模式
+ * 用 file:// 直接双击打开、或 localhost / 127.0.0.1 访问时自动进入：
+ *   · 数据只读写本机 localStorage，一次网络请求都不发（不会污染线上 data.json）
+ *   · 数据初值来自 preview-data.js 的云端快照
+ * 部署到线上（https 域名）后这个开关自动失效，不需要改任何代码。
+ * 另：file:// 与线上 https 是不同的源，localStorage 本来就互不相通，测试数据关在本地。 */
+const PREVIEW_MODE = (function () {
+    try {
+        const h = location.hostname;
+        return location.protocol === 'file:' || h === 'localhost' || h === '127.0.0.1';
+    } catch (e) {
+        return false;
+    }
+})();
+
 let apiKey = localStorage.getItem(API_KEY_STORE) || '';   // 访问口令（只存在本机）
 // 临期窗口天数：由接口下发（product-api 的 REMIND_DAYS），
 // 这样「页面判紧急」和「服务端推送」用的是同一个阈值，不会两边各写一个 30
@@ -62,6 +77,20 @@ let productMappings = JSON.parse(localStorage.getItem('productMappings')) || [];
 // 墓碑单独放一个数组，列表、图表、导出都只看 products，不用为删除改一遍。
 let productTombstones = JSON.parse(localStorage.getItem('productTombstones')) || [];
 let mappingTombstones = JSON.parse(localStorage.getItem('mappingTombstones')) || [];
+
+// 预览模式首次进入：把快照灌进本机。只灌一次，之后测试中的增删都留在本机，
+// 想恢复成快照原样，清掉 localStorage 里这 4 个键再刷新即可（见 previewReset）。
+if (PREVIEW_MODE && window.PREVIEW_DATA && !localStorage.getItem('previewSeeded')) {
+    products = (window.PREVIEW_DATA.products || []).slice();
+    productMappings = (window.PREVIEW_DATA.mappings || []).slice();
+    productTombstones = [];
+    mappingTombstones = [];
+    localStorage.setItem('products', JSON.stringify(products));
+    localStorage.setItem('productMappings', JSON.stringify(productMappings));
+    localStorage.setItem('productTombstones', '[]');
+    localStorage.setItem('mappingTombstones', '[]');
+    localStorage.setItem('previewSeeded', '1');
+}
 
 // 全局变量：当前显示模式（all 或 filter）
 let currentDisplayMode = 'all';
@@ -409,6 +438,7 @@ function stopScanner() {
 
 // 首次使用：让用户填一次访问口令（存在本机，以后不用再填）
 async function ensureApiKey() {
+    if (PREVIEW_MODE) return true;   // 预览模式不联网，不需要口令
     if (apiKey) return true;
 
     const input = window.prompt(
@@ -441,6 +471,8 @@ async function ensureApiKey() {
 // 调一次接口。action: hello（只校验口令）/ pull（合并后返回）/ push（合并 → 写回 → 返回）
 // 每次都把本机整份数据带上：由服务端合并，所以先点哪个按钮都不会丢数据
 async function apiRequest(action, extra) {
+    if (PREVIEW_MODE) return previewApiRequest(action, extra);
+
     const body = Object.assign({
         action: action,
         key: apiKey,
@@ -483,6 +515,29 @@ async function apiRequest(action, extra) {
     return json;
 }
 
+// 预览模式的假接口：把「本机」当云端，保证一次请求都不发。
+// 返回结构照着真接口来，调用方不用为预览改一行。
+function previewApiRequest(action) {
+    return Promise.resolve({
+        code: 0,
+        data: {
+            products: products.slice(),
+            mappings: productMappings.slice(),
+            tombstones: {
+                products: productTombstones.slice(),
+                mappings: mappingTombstones.slice()
+            }
+        },
+        stats: {
+            products: products.length,
+            remoteLive: products.length,
+            mappings: productMappings.length,
+            deletedProducts: productTombstones.length,
+            remoteTombstones: productTombstones.length
+        }
+    });
+}
+
 // 云端下发的配置：临期窗口只在这一处定义，页面与服务端推送用的是同一个值
 function applyRemoteConfig(config) {
     if (!config) return;
@@ -506,6 +561,17 @@ document.addEventListener('DOMContentLoaded', function() {
 function initializeApp() {
     // 绑定事件监听器
     bindEventListeners();
+
+    // 包装下拉的选项在 JS 里统一生成：词表只维护一份（PACKAGE_OPTIONS），
+    // 写死在 HTML 里迟早会和自检表的分组对不上
+    const pkgSelect = document.getElementById('productPackage');
+    if (pkgSelect) pkgSelect.innerHTML = packageOptionsHtml('');
+
+    const newPkgSelect = document.getElementById('newPackage');
+    if (newPkgSelect) newPkgSelect.innerHTML = packageOptionsHtml('', '包装方式：未填');
+
+    // 本地预览：底部挂一条醒目标记，避免把测试数据当成线上的
+    if (PREVIEW_MODE) setupPreviewBanner();
 
     // 注册 PWA Service Worker：让页面可安装、断网也能打开
     registerServiceWorker();
@@ -535,6 +601,24 @@ function initializeApp() {
     refreshConfigQuietly();
 }
 
+// 预览模式：底部挂一条提示，说清「数据不上传」，可手动关掉
+function setupPreviewBanner() {
+    if (document.querySelector('.preview-banner')) return;
+
+    const bar = document.createElement('div');
+    bar.className = 'preview-banner';
+    bar.innerHTML = '<span><strong>本地预览</strong> · 数据只存这台电脑，不上传；线上数据未受影响</span>' +
+                    '<button type="button" class="preview-banner-close" aria-label="关闭">×</button>';
+
+    bar.querySelector('.preview-banner-close').addEventListener('click', function() {
+        bar.remove();
+        document.body.classList.remove('has-preview-banner');
+    });
+
+    document.body.appendChild(bar);
+    document.body.classList.add('has-preview-banner');
+}
+
 // 静默取一次云端配置（临期窗口天数）。失败不提示 —— 打开页面不该先弹个报错
 async function refreshConfigQuietly() {
     if (!apiKey) return;
@@ -552,6 +636,54 @@ function bindEventListeners() {
 
     // 条码输入变化
     document.getElementById('barcode').addEventListener('input', handleBarcodeChange);
+
+    /* ---------- 录入辅助：名称候选 / 最近商品 ---------- */
+    const nameInput = document.getElementById('productName');
+    const nameSuggest = document.getElementById('nameSuggest');
+
+    if (nameInput) {
+        // 输入即出候选。不走防抖：只是过滤几十条档案，比重建整张表轻得多
+        nameInput.addEventListener('input', renderNameSuggest);
+        nameInput.addEventListener('focus', renderNameSuggest);
+        // 键盘：↓ 进候选、Esc 关掉，方便不打字也能选
+        nameInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') { hideNameSuggest(); return; }
+            if (e.key === 'ArrowDown' && nameSuggest && !nameSuggest.hidden) {
+                const first = nameSuggest.querySelector('.suggest-item');
+                if (first) { e.preventDefault(); pickNameSuggest(first); }
+            }
+        });
+    }
+
+    if (nameSuggest) {
+        // 用 mousedown 而不是 click：click 会先触发 input 的 blur，候选已经收起来了
+        nameSuggest.addEventListener('mousedown', function(e) {
+            const item = e.target.closest ? e.target.closest('.suggest-item') : null;
+            if (!item) return;
+            e.preventDefault();
+            pickNameSuggest(item);
+        });
+    }
+
+    const recentChips = document.getElementById('recentChips');
+    if (recentChips) {
+        recentChips.addEventListener('click', function(e) {
+            const chip = e.target.closest ? e.target.closest('.recent-chip') : null;
+            if (chip) pickRecent(chip);
+        });
+    }
+
+    // 点到表单以外就收起候选
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest || !e.target.closest('.name-input-wrapper')) hideNameSuggest();
+
+        // 搜索框下方的「加一批」同理：点别处就收起，否则纯想搜一下的时候它一直占着屏幕。
+        // 但面板已经展开（人正在填日期）时不收 —— 误触一下就把填好的日期弄丢了。
+        if (assistState) return;
+        if (!e.target.closest) return;
+        if (e.target.closest('#listAssist') || e.target.closest('.search-controls')) return;
+        hideListAssist();
+    });
 
     // 摄像头扫码
     const scanBtn = document.getElementById('scanBtn');
@@ -628,6 +760,71 @@ function bindEventListeners() {
         updateProductList();
     });
 
+    /* ---------- 搜索框兼做「加一批」入口 ---------- */
+    const productSearchInput = document.getElementById('productSearch');
+    if (productSearchInput) {
+        // 不走防抖：只是过滤几十条档案，比重建整张表轻，跟手更重要
+        productSearchInput.addEventListener('input', renderListAssist);
+    }
+    const productClearBtn = document.getElementById('productClearSearchBtn');
+    if (productClearBtn) {
+        // 清空动作 bindLiveSearch 已经做了，这里只负责把助手收起来
+        productClearBtn.addEventListener('click', hideListAssist);
+    }
+
+    const listAssist = document.getElementById('listAssist');
+    if (listAssist) {
+        listAssist.addEventListener('click', function(e) {
+            const t = e.target;
+
+            const item = t.closest ? t.closest('.assist-item') : null;
+            if (item) {
+                openBatchPanel('existing', item.getAttribute('data-barcode'), item.getAttribute('data-name'));
+                return;
+            }
+
+            const newBtn = t.closest ? t.closest('.assist-new-btn') : null;
+            if (newBtn) {
+                openBatchPanel('new', '', newBtn.getAttribute('data-name'));
+                return;
+            }
+
+            if (t.id === 'batchSaveBtn') { saveBatchRecord(); return; }
+
+            if (t.id === 'batchBackBtn') {
+                const q = productSearchInput ? productSearchInput.value.trim() : '';
+                assistState = null;
+                renderAssistCandidates(q);
+                return;
+            }
+
+            if (t.id === 'batchRenameBtn') {
+                const nameInput = document.getElementById('batchNameInput');
+                if (!nameInput) return;
+                if (nameInput.readOnly) {
+                    nameInput.readOnly = false;
+                    nameInput.focus();
+                    nameInput.select();
+                    t.textContent = '改名中…';
+                    showToast('改完点「记一条」保存；改的是这个条码下的所有记录', '#ff9800', 4500);
+                } else {
+                    nameInput.readOnly = true;
+                    t.textContent = '改名';
+                }
+            }
+        });
+
+        // 日期联动：生产日期 / 保质期一改就自动算有效期
+        listAssist.addEventListener('input', function(e) {
+            if (e.target.id === 'batchProductionDate' || e.target.id === 'batchShelfLife') {
+                syncBatchValidity();
+            }
+        });
+        listAssist.addEventListener('change', function(e) {
+            if (e.target.id === 'batchShelfLifeUnit') syncBatchValidity();
+        });
+    }
+
     // 映射列表搜索：输入即筛选
     bindLiveSearch('mappingSearch', 'mappingClearSearchBtn', function(value) {
         mappingSearchQuery = value.trim();
@@ -691,6 +888,9 @@ function setAddFormOpen(open, focusBarcode) {
     section.classList.toggle('collapsed', !open);
     if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
 
+    // 展开时才渲染「最近」：既省得页面一进来就画，也保证列的是最新录入的
+    if (open) renderRecentStrip();
+
     if (!open || !focusBarcode) return;
 
     const barcodeInput = document.getElementById('barcode');
@@ -701,16 +901,609 @@ function setAddFormOpen(open, focusBarcode) {
     section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-/* ===================== 5. 商品表单 ===================== */
-// 处理条码输入变化
-function handleBarcodeChange() {
-    const barcode = document.getElementById('barcode').value.trim();
-    const productNameInput = document.getElementById('productName');
+/* ===================== 4.5 录入辅助 =====================
+ * 目标：录入时「有码就扫，没码就打字」，建档由系统顺手做完，人不用记任何数字。
+ *   · 名称输入即出候选（分类、特征、品牌任意一段都能搜到）
+ *   · 最近进过的商品点一下直接填好条码 + 名称
+ *   · 提交时：条码没档案就自动建；没条码就沿用同名档案的码，确实没有才发新 NB 号
+ * ====================================================== */
 
-    // 查找映射
+// 按关键词找档案：空格分隔的多个词要同时出现（「果蔬 蓝莓」能命中「色素-果蔬蓝莓色-法采」）
+function searchMappings(query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return [];
+    const terms = q.split(/\s+/).filter(Boolean);
+
+    const hits = productMappings.filter(function (m) {
+        const lower = String(m.productName || '').toLowerCase();
+        return terms.every(function (t) { return lower.indexOf(t) !== -1; });
+    });
+
+    // 以查询词开头的排前（更像"正要找的那个"），其次按名称长度
+    hits.sort(function (a, b) {
+        const an = String(a.productName || ''), bn = String(b.productName || '');
+        const ap = an.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+        const bp = bn.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        return an.length - bn.length;
+    });
+    return hits;
+}
+
+// 命中的词加粗，一眼确认是不是这一条
+function markMatch(name, query) {
+    let out = escapeHtml(name);
+    const segs = String(query || '').trim().split(/\s+/).filter(Boolean);
+    for (const t of segs) {
+        const esc = escapeHtml(t);
+        if (!esc) continue;
+        out = out.split(esc).join('<b>' + esc + '</b>');
+    }
+    return out;
+}
+
+function hideNameSuggest() {
+    const box = document.getElementById('nameSuggest');
+    if (box) { box.hidden = true; box.innerHTML = ''; }
+}
+
+function renderNameSuggest() {
+    const box = document.getElementById('nameSuggest');
+    const input = document.getElementById('productName');
+    if (!box || !input) return;
+
+    const query = input.value.trim();
+    if (!query) { hideNameSuggest(); return; }
+
+    const hits = searchMappings(query).slice(0, 8);
+    if (hits.length === 0) {
+        box.innerHTML = '<div class="suggest-empty">没有匹配 · 继续输入就是新建</div>';
+        box.hidden = false;
+        return;
+    }
+
+    box.innerHTML = hits.map(function (m) {
+        const code = String(m.barcode || '');
+        const isNB = /^NB\d{3,}$/i.test(code);
+        return '<div class="suggest-item" data-barcode="' + escapeHtml(code) + '"' +
+               ' data-name="' + escapeHtml(m.productName) + '">' +
+               '<span class="suggest-name">' + markMatch(m.productName, query) + '</span>' +
+               '<span class="suggest-code' + (isNB ? ' is-nb' : '') + '">' + escapeHtml(code) + '</span>' +
+               '</div>';
+    }).join('');
+
+    const wasHidden = box.hidden;
+    box.hidden = false;
+
+    // 刚展开且下方装不下时，把页面往上带一点，别让候选卡在屏幕外。
+    // 只在首次展开时滚，不然每敲一个字都跳一下。
+    if (wasHidden) {
+        const rect = box.getBoundingClientRect();
+        const reserve = document.body.classList.contains('has-preview-banner') ? 46 : 8;
+        const limit = window.innerHeight - reserve;
+        if (rect.bottom > limit) {
+            window.scrollBy(0, Math.min(rect.bottom - limit, 180));
+        }
+    }
+}
+
+// 点候选项：填名称；条码没填就补上（扫到的码比档案里的更可靠，不覆盖）
+function pickNameSuggest(item) {
+    const name = item.getAttribute('data-name') || '';
+    const code = item.getAttribute('data-barcode') || '';
+    const nameInput = document.getElementById('productName');
+    const bcInput = document.getElementById('barcode');
+
+    if (nameInput) nameInput.value = name;
+
+    if (bcInput) {
+        if (!bcInput.value.trim()) {
+            bcInput.value = code;
+        } else if (bcInput.value.trim() !== code) {
+            showToast('扫到的条码与「' + name + '」的档案不一致，提交时会以档案为准', '#ff9800', 5000);
+        }
+    }
+
+    hideNameSuggest();
+    handleBarcodeChange();
+
+    const pd = document.getElementById('productionDate');
+    if (pd) pd.focus();
+}
+
+// 芯片上只显示「分类-特征」，太长会撑破一行
+function compactName(name) {
+    const segs = String(name || '').split('-');
+    let s = segs.slice(0, 2).join('-');
+    if (s.length > 11) s = s.slice(0, 10) + '…';
+    return escapeHtml(s);
+}
+
+// 最近录入的 10 个商品，点一下直接填好条码 + 名称
+function renderRecentStrip() {
+    const strip = document.getElementById('recentStrip');
+    const chips = document.getElementById('recentChips');
+    if (!strip || !chips) return;
+
+    const seen = new Set();
+    const list = [];
+    const sorted = products.slice().sort(function (a, b) {
+        return String(b.createdAt || b.updatedAt || '')
+            .localeCompare(String(a.createdAt || a.updatedAt || ''));
+    });
+
+    for (let i = 0; i < sorted.length; i++) {
+        const p = sorted[i];
+        const key = String(p.barcode || '') + '|' + String(p.productName || '');
+        if (!p.productName || seen.has(key)) continue;
+        seen.add(key);
+        list.push(p);
+        if (list.length >= 10) break;
+    }
+
+    if (list.length === 0) { strip.hidden = true; return; }
+
+    chips.innerHTML = list.map(function (p) {
+        return '<button type="button" class="recent-chip"' +
+               ' data-barcode="' + escapeHtml(p.barcode) + '"' +
+               ' data-name="' + escapeHtml(p.productName) + '"' +
+               ' title="' + escapeHtml(p.productName) + '">' +
+               compactName(p.productName) + '</button>';
+    }).join('');
+    strip.hidden = false;
+}
+
+function pickRecent(chip) {
+    const code = chip.getAttribute('data-barcode') || '';
+    const name = chip.getAttribute('data-name') || '';
+    document.getElementById('barcode').value = code;
+    document.getElementById('productName').value = name;
+    hideNameSuggest();
+    handleBarcodeChange();
+
+    const pd = document.getElementById('productionDate');
+    if (pd) pd.focus();
+}
+
+/* ===================== 4.6 包装方式 =====================
+ * 包装是商品档案（条码）的属性，不是某一批的属性 —— 同一件货不会今天瓶装明天袋装。
+ * 存进 mappings.packageType，跟着商品走，换设备同步一次就一致。
+ *
+ * 为什么必须用固定词表：这个词是自检表分组的键。写成「瓶子」「塑料装的」这类
+ * 自创说法，同一类货就分不到一组，盘点时按货架走的那条线就断了。
+ * 留空 = 还没看清是什么装，和「散装」（没有容器）不是一回事。
+ * ================================================== */
+const PACKAGE_OPTIONS = ['瓶装', '袋装', '罐装', '盒装', '桶装', '条装', '玻璃瓶', '散装'];
+
+// 生成 <option>，current 命中的那个选中；空值那一项的文案可定制
+// （表单里有「包装方式:」这个 label，写「未填」就够了；
+//   映射管理那边没有 label，得写全「包装方式：未填」才知道这格是什么）
+function packageOptionsHtml(current, emptyLabel) {
+    const cur = String(current || '').trim();
+    let html = '<option value="">' + (emptyLabel || '未填') + '</option>';
+    PACKAGE_OPTIONS.forEach(function (p) {
+        html += '<option value="' + p + '"' + (p === cur ? ' selected' : '') + '>' + p + '</option>';
+    });
+    return html;
+}
+
+// 取某个条码档案里的包装
+function getMappingPackage(barcode) {
+    const code = String(barcode || '').trim();
+    if (!code) return '';
+    const m = productMappings.find(function (x) {
+        return String(x.barcode || '').trim() === code;
+    });
+    return m ? String(m.packageType || '').trim() : '';
+}
+
+// 改档案里的包装。返回 true 表示真的改了（用于决定要不要提示）
+function setMappingPackage(barcode, packageType) {
+    const code = String(barcode || '').trim();
+    if (!code) return false;
+
+    const m = productMappings.find(function (x) {
+        return String(x.barcode || '').trim() === code;
+    });
+    if (!m) return false;
+
+    const val = String(packageType || '').trim();
+    if (String(m.packageType || '').trim() === val) return false;
+
+    m.packageType = val;
+    touchRecord(m);        // 包装也算一次修改，别的设备要能收到
+    saveMappings();
+    return true;
+}
+
+/* ===================== 4.7 搜索框旁的「加一批」 =====================
+ * 日常真正反复发生的动作是「又到了一批货」，不是「新建一个商品」。
+ * 所以入口就放在最常用的搜索框：打两三个字 → 出候选 → 挑一条 → 只填日期。
+ * 只有「从来没进过的货」才需要专门去「添加商品」（那边能扫码、能填全）。
+ * ================================================== */
+
+let assistState = null;   // { mode:'existing'|'new', barcode, name, query }
+
+function hideListAssist() {
+    const box = document.getElementById('listAssist');
+    assistState = null;
+    if (!box) return;
+    box.hidden = true;
+    box.innerHTML = '';
+}
+
+// 名称和条码两个方向都找：输一串数字基本就是奔着条码去的，命中的排前面
+function searchMappingsSmart(query) {
+    const q = String(query || '').trim();
+    if (!q) return [];
+
+    const lower = q.toLowerCase();
+    const byCode = productMappings.filter(function (m) {
+        return String(m.barcode || '').toLowerCase().indexOf(lower) !== -1;
+    });
+    const byName = searchMappings(q);
+
+    const seen = new Set();
+    const out = [];
+    byCode.concat(byName).forEach(function (m) {
+        const key = String(m.barcode || '') + '|' + String(m.productName || '');
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(m);
+    });
+    return out;
+}
+
+// 搜索框内容变了就重画助手。面板展开期间（人正在填日期）不打断，
+// 除非搜索框里的字又变了 —— 那说明他换目标了
+function renderListAssist() {
+    const input = document.getElementById('productSearch');
+    if (!input) return;
+
+    const query = input.value.trim();
+    if (!query) { hideListAssist(); return; }
+    if (assistState && assistState.query === query) return;
+
+    assistState = null;
+    renderAssistCandidates(query);
+}
+
+function renderAssistCandidates(query) {
+    const box = document.getElementById('listAssist');
+    if (!box) return;
+
+    const hits = searchMappingsSmart(query).slice(0, 6);
+    let html = '';
+
+    if (hits.length) {
+        html += '<div class="assist-head">又到了一批？挑一个直接记：</div><div class="assist-items">';
+        html += hits.map(function (m) {
+            const code = String(m.barcode || '');
+            const isNB = /^NB\d{3,}$/i.test(code);
+            return '<button type="button" class="assist-item"' +
+                   ' data-barcode="' + escapeHtml(code) + '"' +
+                   ' data-name="' + escapeHtml(m.productName) + '">' +
+                   '<span class="assist-name">' + markMatch(m.productName, query) + '</span>' +
+                   '<span class="assist-code' + (isNB ? ' is-nb' : '') + '">' + escapeHtml(code) + '</span>' +
+                   '<span class="assist-go">＋ 加一批</span>' +
+                   '</button>';
+        }).join('');
+        html += '</div>';
+    }
+
+    html += '<div class="assist-new">' +
+            (hits.length ? '都不是这个？' : '库里没有「' + escapeHtml(query) + '」，') +
+            '<button type="button" class="assist-new-btn" data-name="' + escapeHtml(query) + '">' +
+            '当新商品录</button></div>';
+
+    box.innerHTML = html;
+    box.hidden = false;
+}
+
+// 展开就地录入面板。mode='existing' 用档案里已定的条码；
+// mode='new' 多给一个条码框（有真码就填/扫，没有就留空由系统发号）
+function openBatchPanel(mode, barcode, name) {
+    const box = document.getElementById('listAssist');
+    const searchInput = document.getElementById('productSearch');
+    if (!box) return;
+
+    assistState = {
+        mode: mode,
+        barcode: barcode,
+        name: name,
+        query: searchInput ? searchInput.value.trim() : ''
+    };
+
+    const isNB = /^NB\d{3,}$/i.test(String(barcode || ''));
+
+    let html = '<div class="batch-panel">';
+    html += '<div class="batch-target">' +
+              '<span class="batch-mode' + (mode === 'new' ? ' is-new' : '') + '">' +
+                (mode === 'new' ? '新商品' : '已在库里') + '</span>' +
+              '<input type="text" class="batch-name-input" id="batchNameInput" readonly value="' +
+                escapeHtml(name) + '">' +
+              (mode === 'new'
+                ? '<input type="text" class="batch-code-input" id="batchCodeInput" ' +
+                  'placeholder="条码（没有就留空，系统自动发号）" autocomplete="off">'
+                : '<span class="assist-code' + (isNB ? ' is-nb' : '') + '">' + escapeHtml(barcode) + '</span>') +
+            '</div>';
+
+    html += '<div class="batch-fields">' +
+              '<label>包装<select id="batchPackage">' +
+                packageOptionsHtml(getMappingPackage(barcode)) +
+              '</select></label>' +
+              '<label>生产日期<input type="date" id="batchProductionDate"></label>' +
+              '<label>保质期<span class="inline-pair">' +
+                '<input type="number" id="batchShelfLife" min="1" placeholder="数量">' +
+                '<select id="batchShelfLifeUnit">' +
+                  '<option value="天">天</option>' +
+                  '<option value="月" selected>个月</option>' +
+                  '<option value="年">年</option>' +
+                '</select></span></label>' +
+              '<label>有效期<input type="date" id="batchValidity"></label>' +
+            '</div>';
+
+    html += '<div class="batch-actions">' +
+              '<button type="button" class="btn btn-primary" id="batchSaveBtn">记一条</button>' +
+              '<button type="button" class="btn btn-secondary" id="batchRenameBtn">改名</button>' +
+              '<button type="button" class="btn btn-secondary" id="batchBackBtn">换商品</button>' +
+            '</div>';
+    html += '</div>';
+
+    box.innerHTML = html;
+    box.hidden = false;
+
+    const pd = document.getElementById('batchProductionDate');
+    if (pd) pd.focus();
+}
+
+// 从三个输入算有效期，和主表单的算法保持一致
+function computeValidityFrom(productionDateStr, amount, unit) {
+    const d = parseDateLocal(productionDateStr);
+    const n = parseInt(amount, 10);
+    if (!d || !n || n <= 0) return '';
+
+    let exp;
+    if (unit === '天') {
+        exp = new Date(d.getTime());
+        exp.setDate(exp.getDate() + n);
+    } else if (unit === '年') {
+        exp = addMonthsClamped(d, n * 12);
+    } else {
+        exp = addMonthsClamped(d, n);
+    }
+    return formatDateLocal(exp);
+}
+
+// 面板里的日期联动：填了生产日期 + 保质期就自动算出有效期
+function syncBatchValidity() {
+    const pd = document.getElementById('batchProductionDate');
+    const sl = document.getElementById('batchShelfLife');
+    const unit = document.getElementById('batchShelfLifeUnit');
+    const validity = document.getElementById('batchValidity');
+    if (!pd || !sl || !validity) return;
+
+    const v = computeValidityFrom(pd.value, sl.value, unit ? unit.value : '月');
+    if (v) validity.value = v;
+}
+
+// 「记一条」：名称/条码已是档案里确定的值，这里只补日期，不再走一遍建档判断
+function saveBatchRecord() {
+    if (!assistState) return;
+
+    const nameInput = document.getElementById('batchNameInput');
+    const validityInput = document.getElementById('batchValidity');
+    const name = String(nameInput ? nameInput.value : '').trim();
+    const validity = validityInput ? validityInput.value : '';
+
+    if (!name) {
+        showToast('商品名称不能为空', '#f44336');
+        return;
+    }
+    if (!validity) {
+        showToast('有效期还没填', '#f44336');
+        if (validityInput) validityInput.focus();
+        return;
+    }
+
+    // 名称被改过：整个条码下的记录 + 映射一起改名。不可逆，先问一句
+    if (name !== assistState.name && assistState.mode === 'existing') {
+        const ok = window.confirm(
+            '把名称改成「' + name + '」？\n\n' +
+            '这个条码下的所有记录（含已处理的）会一起改名，映射表也同步。\n' +
+            '历史记录里不会保留旧名字。'
+        );
+        if (!ok) return;
+
+        const m = productMappings.find(function (x) {
+            return String(x.barcode || '').trim() === String(assistState.barcode).trim();
+        });
+        if (m) {
+            m.productName = name;
+            m.updatedAt = new Date().toISOString();
+            saveMappings();
+        }
+        syncProductNames(assistState.barcode, name);
+        assistState.name = name;
+    }
+
+    let barcode = assistState.barcode;
+
+    if (assistState.mode === 'new') {
+        const codeInput = document.getElementById('batchCodeInput');
+        const raw = codeInput ? codeInput.value.trim() : '';
+        const resolved = resolveBarcodeAndName(raw, name);
+        barcode = resolved.barcode;
+        assistState.barcode = barcode;      // 已建档，后面连记几条都沿用这个码
+        assistState.mode = 'existing';
+        assistState.name = resolved.productName;
+        if (resolved.note) showToast(resolved.note, '#4caf50', 3000);
+    }
+
+    const pd = document.getElementById('batchProductionDate');
+    const sl = document.getElementById('batchShelfLife');
+    const unit = document.getElementById('batchShelfLifeUnit');
+    const pkgSelect = document.getElementById('batchPackage');
+
+    // 包装记在档案上（不是这一批）：这里选了什么，这个条码以后都按它显示。
+    // 放在条码确定之后 —— 新商品第一次提交时档案刚建好，正好顺手补上
+    if (pkgSelect) setMappingPackage(barcode, pkgSelect.value);
+
+    // 借 FormData 走一遍 buildProductFromForm，字段口径和大表单完全一致
+    const fd = new FormData();
+    fd.set('barcode', barcode);
+    fd.set('productName', name);
+    fd.set('productionDate', pd ? pd.value : '');
+    fd.set('shelfLife', sl ? sl.value : '');
+    fd.set('validity', validity);
+
+    products.push(buildProductFromForm(fd, unit ? unit.value : '月'));
+
+    saveProducts();
+    updateProductList();
+    updateMappingList();
+    updateReminder();
+    renderRecentStrip();
+
+    // 清掉日期，面板留着 —— 连着记几条不用重新挑商品
+    if (pd) pd.value = '';
+    if (sl) sl.value = '';
+    if (validityInput) validityInput.value = '';
+    if (pd) pd.focus();
+
+    showToast('已记一条：' + name, '#4caf50', 2500);
+}
+
+// 找同名档案（名称完全一致），用于「没码的商品复购沿用旧码」
+function findMappingByName(name) {
+    const n = String(name || '').trim();
+    if (!n) return null;
+    return productMappings.find(function (m) {
+        return String(m.productName || '').trim() === n;
+    }) || null;
+}
+
+// 发新内部码：取现有 NB 号最大值 +1（同时扫商品记录，防止档案丢了导致重号）
+function nextInternalCode() {
+    let max = 0;
+    const scan = function (code) {
+        const mt = /^NB(\d{3,})$/i.exec(String(code || '').trim());
+        if (mt) {
+            const n = parseInt(mt[1], 10);
+            if (n > max) max = n;
+        }
+    };
+    productMappings.forEach(function (m) { scan(m.barcode); });
+    products.forEach(function (p) { scan(p.barcode); });
+    return 'NB' + String(max + 1).padStart(4, '0');
+}
+
+// 条码没有档案就建一条，返回档案对象
+function ensureMapping(barcode, productName) {
+    const code = String(barcode || '').trim();
+    if (!code) return null;
+
+    const exist = productMappings.find(function (m) {
+        return String(m.barcode || '').trim() === code;
+    });
+    if (exist) return exist;
+
+    const now = new Date().toISOString();
+    const m = {
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        barcode: code,
+        productName: String(productName || '').trim(),
+        createdAt: now,
+        updatedAt: now
+    };
+    productMappings.push(m);
+    saveMappings();
+    return m;
+}
+
+// 扫到真码，但同名商品早先用内部码建过档 —— 把真码并过去，NB 号作废。
+// 改条码不可逆，所以不静默做，先让用户确认。
+function mergeInternalIntoReal(nbCode, realCode, name) {
+    const ok = window.confirm(
+        '「' + name + '」原来用内部码 ' + nbCode + ' 建档，这次扫到了真实条码 ' + realCode + '。\n\n' +
+        '是否把真码并入？\n' +
+        '  · 已有记录一起改成真码\n' +
+        '  · 内部码 ' + nbCode + ' 作废\n\n' +
+        '点「取消」则保留内部码，本次仍按 ' + nbCode + ' 记录。'
+    );
+    if (!ok) return false;
+
+    const now = new Date().toISOString();
+
+    const m = productMappings.find(function (x) {
+        return String(x.barcode || '').trim() === nbCode;
+    });
+    if (m) {
+        m.barcode = realCode;
+        m.updatedAt = now;
+    } else {
+        productMappings.push({
+            id: Date.now() + Math.floor(Math.random() * 1000),
+            barcode: realCode, productName: name, createdAt: now, updatedAt: now
+        });
+    }
+
+    // 同一件货的历史记录一起改，否则列表里会留一堆指向旧 NB 号的记录
+    products.forEach(function (p) {
+        if (String(p.barcode || '').trim() === nbCode) {
+            p.barcode = realCode;
+            p.updatedAt = now;
+        }
+    });
+
+    saveMappings();
+    saveProducts();
+    updateMappingList();
+    updateProductList();
+    return true;
+}
+
+/* ===================== 5. 商品表单 ===================== */
+// 处理条码输入变化：已建档就带出名称，没建档就提示「输入名称即可」
+function handleBarcodeChange() {
+    const barcodeInput = document.getElementById('barcode');
+    const barcode = barcodeInput ? barcodeInput.value.trim() : '';
+    const productNameInput = document.getElementById('productName');
+    const hint = document.getElementById('barcodeHint');
+    if (!productNameInput) return;
+
+    if (!barcode) {
+        if (hint) { hint.hidden = true; hint.textContent = ''; }
+        return;
+    }
+
     const mapping = productMappings.find(function(item) { return item.barcode === barcode; });
-    // 只有查到映射才覆盖名称；查不到时保留手填内容，不要清空
-    if (mapping) productNameInput.value = mapping.productName;
+
+    if (mapping) {
+        // 已建档：带出名称
+        productNameInput.value = mapping.productName;
+
+        // 包装也一起带出来（存在档案上），省得每次重选；
+        // 万一值不在词表里（老数据自创的写法），就退回「未填」，不硬塞
+        const pkgEl = document.getElementById('productPackage');
+        if (pkgEl) {
+            const p = String(mapping.packageType || '').trim();
+            pkgEl.value = PACKAGE_OPTIONS.indexOf(p) !== -1 ? p : '';
+        }
+
+        if (hint) {
+            hint.hidden = false;
+            hint.className = 'field-hint is-ok';
+            hint.textContent = '✓ 已建档，名称自动带出';
+        }
+    } else {
+        // 新条码：保留手填内容，别清空
+        if (hint) {
+            hint.hidden = false;
+            hint.className = 'field-hint is-new';
+            hint.textContent = '新条码 · 填名称后提交，会自动建档';
+        }
+    }
 }
 
 // 计算到期日期（保质期支持 天 / 月 / 年）
@@ -760,6 +1553,67 @@ function buildProductFromForm(formData, shelfLifeUnit) {
     };
 }
 
+/* ---------- 建档：条码 ↔ 名称，由系统顺手完成 ----------
+ * 「添加商品」表单和搜索框旁的「加一批」共用这一段。
+ * 两处各写一套判断的话，改了一处忘另一处，同一件货就会分裂成两个档案
+ * —— 这正是之前自编码混乱的老病根。
+ * 返回 { barcode, productName, note }，note 用来告诉人系统做了什么。
+ */
+function resolveBarcodeAndName(rawBarcode, rawName) {
+    let barcode = String(rawBarcode || '').trim();
+    let productName = String(rawName || '').trim();
+    let note = '';
+
+    if (!barcode) {
+        // 没条码：同名档案有码就沿用（同一件货复购不该换新号），确实没有才发新号
+        const same = findMappingByName(productName);
+        if (same) {
+            barcode = String(same.barcode || '').trim();
+            note = '沿用原码 ' + barcode;
+        } else {
+            barcode = nextInternalCode();
+            ensureMapping(barcode, productName);
+            note = '新商品，已分配内部码 ' + barcode;
+        }
+        return { barcode: barcode, productName: productName, note: note };
+    }
+
+    const exist = productMappings.find(function (m) {
+        return String(m.barcode || '').trim() === barcode;
+    });
+
+    if (exist) {
+        // 条码已有档案：以档案名称为准，避免同一个码挂两个名字
+        const kept = String(exist.productName || '').trim();
+        if (kept && kept !== productName) {
+            showToast('该条码已建档为「' + kept + '」，已按档案名记录', '#ff9800', 5000);
+            productName = kept;
+        }
+        return { barcode: barcode, productName: productName, note: note };
+    }
+
+    // 新条码：先看有没有同名的内部码档案 —— 是同一件货就该并入，不该分裂成两条
+    const nbSame = productMappings.find(function (m) {
+        return String(m.productName || '').trim() === productName &&
+               /^NB\d{3,}$/i.test(String(m.barcode || '').trim());
+    });
+
+    if (nbSame) {
+        const nb = String(nbSame.barcode).trim();
+        if (mergeInternalIntoReal(nb, barcode, productName)) {
+            note = '真码已并入，内部码 ' + nb + ' 作废';
+        } else {
+            barcode = nb;
+            note = '保留原内部码 ' + barcode;
+        }
+    } else {
+        ensureMapping(barcode, productName);
+        note = '新商品，已建档';
+    }
+
+    return { barcode: barcode, productName: productName, note: note };
+}
+
 // 处理商品表单提交
 // 「添加」和「编辑」走同一套逻辑：都往 products 里 push 一条新记录。
 // 编辑 = 重新添加一条：uid、扫描日期、类型、创建时间全部按新记录生成，
@@ -767,21 +1621,47 @@ function buildProductFromForm(formData, shelfLifeUnit) {
 function handleProductSubmit(e) {
     e.preventDefault();
 
-    const formData = new FormData(e.target);
-    const editingId = e.target.dataset.editingId;   // 有值 = 从列表里点过「编辑」
+    const form = e.target;
+    const formData = new FormData(form);
+    const editingId = form.dataset.editingId;   // 有值 = 从列表里点过「编辑」
 
     const shelfLifeUnitInput = document.getElementById('shelfLifeUnit');
     const shelfLifeUnit = shelfLifeUnitInput ? shelfLifeUnitInput.value : '月';
+
+    let barcode = String(formData.get('barcode') || '').trim();
+    let productName = String(formData.get('productName') || '').trim();
+    let note = '';
+
+    if (!productName) {
+        showToast('商品名称不能为空', '#f44336');
+        return;
+    }
+
+    const resolved = resolveBarcodeAndName(barcode, productName);
+    barcode = resolved.barcode;
+    productName = resolved.productName;
+    note = resolved.note;
+
+    // 把确定后的条码/名称写回，后面构造记录直接用
+    formData.set('barcode', barcode);
+    formData.set('productName', productName);
+
+    // 包装存在档案上（跟着条码走），不写进这条批次记录
+    const pkgEl = document.getElementById('productPackage');
+    if (pkgEl) setMappingPackage(barcode, pkgEl.value);
 
     products.push(buildProductFromForm(formData, shelfLifeUnit));
 
     saveProducts();
     updateProductList();
+    updateMappingList();
     updateReminder();
+    renderRecentStrip();
 
     resetProductForm();
 
-    alert(editingId ? '已按修改后的内容新增一条记录，原来那条仍保留在列表里。' : '商品添加成功！');
+    alert((editingId ? '已按修改后的内容新增一条记录，原来那条仍保留在列表里。' : '商品添加成功！') +
+          (note ? '\n\n' + note : ''));
 }
 
 // 把商品表单恢复成「添加商品」的初始状态：
@@ -890,12 +1770,16 @@ function updateProductList() {
         });
     }
 
-    // 应用搜索过滤
+    // 应用搜索过滤。空格分隔的多个词要同时命中，和上方候选的口径保持一致 ——
+    // 否则输入「色素 蓝莓」时候选出两条、列表却说没有，看着像坏了
     if (productSearchQuery) {
-        const query = productSearchQuery.toLowerCase();
+        const terms = productSearchQuery.toLowerCase().split(/\s+/).filter(Boolean);
         displayProducts = displayProducts.filter(function(p) {
-            return (p.productName || '').toLowerCase().includes(query) ||
-                   (p.barcode || '').includes(query);
+            const name = (p.productName || '').toLowerCase();
+            const code = String(p.barcode || '').toLowerCase();
+            return terms.every(function(t) {
+                return name.indexOf(t) !== -1 || code.indexOf(t) !== -1;
+            });
         });
     }
 
@@ -919,6 +1803,9 @@ function updateProductList() {
         let tip = '没有符合条件的商品';
         if (currentDisplayMode === 'handled') {
             tip = '还没有标记过处理的商品';
+        } else if (productSearchQuery) {
+            // 搜索没结果时说成「没有待处理的商品」会很误导，直接点明是没搜到
+            tip = '没有匹配「' + productSearchQuery + '」的商品';
         } else if (products.length > 0) {
             tip = '没有待处理的商品（处理过的默认隐藏，可点「显示已处理」查看）';
         }
@@ -1185,10 +2072,13 @@ function updateMappingList() {
     displayMappings.forEach(function(mapping, index) {
         const row = document.createElement('tr');
 
+        const pkg = String(mapping.packageType || '').trim();
+
         row.innerHTML = `
             <td>${index + 1}</td>
-            <td>${mapping.barcode}</td>
-            <td>${mapping.productName}</td>
+            <td>${escapeHtml(mapping.barcode)}</td>
+            <td>${escapeHtml(mapping.productName)}</td>
+            <td>${pkg ? escapeHtml(pkg) : '<span class="pkg-empty">未填</span>'}</td>
             <td>
                 <button class="btn btn-secondary" onclick="editMapping('${mapping.id}')">编辑</button>
                 <button class="btn btn-danger" onclick="deleteMapping('${mapping.id}')">删除</button>
@@ -1221,6 +2111,13 @@ window.editProduct = function(id) {
         if (unitInput) unitInput.value = product.shelfLifeUnit || '月';
 
         document.getElementById('validity').value = product.validity;
+
+        // 包装不在批次记录里，从档案上取
+        const pkgEl = document.getElementById('productPackage');
+        if (pkgEl) {
+            const p = getMappingPackage(product.barcode);
+            pkgEl.value = PACKAGE_OPTIONS.indexOf(p) !== -1 ? p : '';
+        }
 
         // 设置编辑模式
         setEditMode(id);
@@ -1402,6 +2299,8 @@ window.undoHandle = function(id) {
 function addMapping() {
     const barcode = document.getElementById('newBarcode').value;
     const productName = document.getElementById('newProductName').value;
+    const pkgEl = document.getElementById('newPackage');
+    const packageType = pkgEl ? pkgEl.value : '';
     const addMappingBtn = document.getElementById('addMappingBtn');
     const isEditing = addMappingBtn.dataset.editingId;
 
@@ -1420,6 +2319,7 @@ function addMapping() {
             productMappings[mappingIndex] = Object.assign({}, productMappings[mappingIndex], {
                 barcode: barcode,
                 productName: productName,
+                packageType: packageType,
                 updatedAt: new Date().toISOString()
             });
 
@@ -1435,6 +2335,7 @@ function addMapping() {
 
             document.getElementById('newBarcode').value = '';
             document.getElementById('newProductName').value = '';
+            if (pkgEl) pkgEl.value = '';
 
             delete addMappingBtn.dataset.editingId;
             addMappingBtn.textContent = '添加映射';
@@ -1448,6 +2349,7 @@ function addMapping() {
         if (existingIndex >= 0) {
             // 更新现有映射
             productMappings[existingIndex].productName = productName;
+            productMappings[existingIndex].packageType = packageType;
             touchRecord(productMappings[existingIndex]);
             syncProductNames(barcode, productName);
         } else {
@@ -1456,6 +2358,7 @@ function addMapping() {
                 id: Date.now(),
                 barcode: barcode,
                 productName: productName,
+                packageType: packageType,
                 updatedAt: new Date().toISOString()
             });
         }
@@ -1465,6 +2368,7 @@ function addMapping() {
 
         document.getElementById('newBarcode').value = '';
         document.getElementById('newProductName').value = '';
+        if (pkgEl) pkgEl.value = '';
 
         alert('映射保存成功！');
     }
@@ -1496,6 +2400,13 @@ window.editMapping = function(id) {
     try {
         document.getElementById('newBarcode').value = mapping.barcode;
         document.getElementById('newProductName').value = mapping.productName;
+
+        // 包装一起带出来（老档案没有这个字段 = 未填）
+        const pkgEl = document.getElementById('newPackage');
+        if (pkgEl) {
+            const p = String(mapping.packageType || '').trim();
+            pkgEl.value = PACKAGE_OPTIONS.indexOf(p) !== -1 ? p : '';
+        }
 
         document.getElementById('addMappingBtn').dataset.editingId = id;
         document.getElementById('addMappingBtn').textContent = '更新映射';

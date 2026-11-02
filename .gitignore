@@ -13,3 +13,12 @@ cloudfunctions/site/public/
 
 # 发布静态页面时的暂存目录
 .deploy-tmp/
+
+# 本地数据与工作产物——本仓库是 public（GitHub Pages 免费版要求），
+# 下面这些含真实商品条码、名称、到期日，一旦推上去就是公开的，绝不许提交：
+#   preview-data.js  本地预览用的数据快照（线上不需要，PREVIEW_MODE=false 时不读取）
+#   自检表/          每月自检表（xlsx / pdf / csv / md）及生成脚本的本地产物
+#   备份/            界面改造前快照、data.json 云端备份
+preview-data.js
+自检表/
+备份/

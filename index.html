@@ -12,7 +12,7 @@
     <!-- 资源地址带版本号：静态托管的 Cache-Control 是 max-age=31536000（一年），
          CDN 和浏览器都会长期留着老副本，改了代码不加版本号就还是跑旧的。
          每次改完 css / js，把下面的 v 值换一下（例如换成当天日期）再部署 -->
-    <link rel="stylesheet" href="styles.css?v=202609210842">
+    <link rel="stylesheet" href="styles.css?v=202611021718">
     <!-- 扫码库放在本地，避免国内访问 CDN 不稳定甚至加载不出来。
          图表已改成一行统计标签，不再需要 Chart.js（顺带省下 205KB） -->
     <script src="html5-qrcode.min.js?v=202609210842"></script>
@@ -21,6 +21,19 @@
     <script src="shared/dates.js?v=202609210842"></script>
     <script src="shared/merge.js?v=202609210842"></script>
     <script src="shared/csv.js?v=202609210842"></script>
+    <!-- 本地预览用的数据快照（window.PREVIEW_DATA）。用 file:// 或 localhost 打开时，
+         script.js 会自动进入预览模式，只读这份快照 + localStorage，一次请求都不发。
+         这里不在 HTML 里写死 <script src>：快照含真实商品数据，不进公开仓库，
+         线上若硬写会白吃一个 404。所以改成解析期按环境注入——本地才请求这个文件。
+         （解析阶段同步 document.write，能保证 window.PREVIEW_DATA 早于 script.js 就绪） -->
+    <script>
+        (function () {
+            var h = location.hostname;
+            if (location.protocol === 'file:' || h === 'localhost' || h === '127.0.0.1') {
+                document.write('<script src="preview-data.js?v=202611021718"><\/script>');
+            }
+        })();
+    </script>
     <!-- 不再引入 CloudBase SDK：数据读写统一走云函数 product-api（HTTP 访问服务），
          页面里没有任何仓库令牌，也不需要匿名登录 -->
 </head>
@@ -48,11 +61,19 @@
                     <button id="handledFilterBtn" class="btn btn-secondary">显示已处理</button>
                 </div>
 
-                <!-- 搜索：输入即筛选，所以不需要「搜索」按钮，输入框和「清空」收成一行 -->
+                <!-- 搜索：输入即筛选，所以不需要「搜索」按钮，输入框和「清空」收成一行。
+                     同一个框兼管「又到一批」：打名字出候选，挑一条就地填日期入库，
+                     不用翻到下面的「添加商品」去重打一遍名字 -->
                 <div class="search-controls">
-                    <input type="text" id="productSearch" placeholder="搜索名称或条码">
+                    <input type="text" id="productSearch" placeholder="搜索名称或条码；也可直接加一批"
+                           autocomplete="off">
                     <button id="productClearSearchBtn" class="btn btn-secondary">清空</button>
                 </div>
+
+                <!-- 搜索框下方的录入助手：候选商品 + 就地录入面板。
+                     放在文档流里而不是浮层：手机上浮层会被键盘和屏幕边缘裁掉，
+                     而这里展开后直接把表格往下推，看得全 -->
+                <div class="list-assist" id="listAssist" hidden></div>
 
                 <div class="scrollable-content">
                     <table id="productTable">
@@ -89,16 +110,38 @@
                     <span class="toggle-mark" aria-hidden="true">▾</span>
                 </button>
                 <form id="productForm" hidden>
+                    <!-- 最近进过的商品：点一下直接填好条码+名称。
+                         没条码的商品用这个比扫码还快，连名字都不用打 -->
+                    <div class="recent-strip" id="recentStrip" hidden>
+                        <span class="recent-label">最近：</span>
+                        <div class="recent-chips" id="recentChips"></div>
+                    </div>
+                    <!-- 名称在条码前面：日常录的是「又到了一批某某」，
+                         先打两三个字挑出是哪个商品，条码由候选带出来；
+                         只有扫到新码时才需要直接动条码框 -->
+                    <div class="form-group">
+                        <label for="productName">商品名称:</label>
+                        <div class="name-input-wrapper">
+                            <input type="text" id="productName" name="productName"
+                                   placeholder="输入两三个字，下面出候选" required autocomplete="off">
+                            <div class="name-suggest" id="nameSuggest" hidden></div>
+                        </div>
+                        <div class="field-hint" id="nameHint" hidden></div>
+                    </div>
+                    <!-- 包装方式：选填，但字段常在。它是盘点时按货架分组的依据，
+                         词表固定（见 script.js 的 PACKAGE_OPTIONS），不许自创写法 -->
+                    <div class="form-group">
+                        <label for="productPackage">包装方式:</label>
+                        <select id="productPackage" name="productPackage"></select>
+                        <div class="field-hint" id="packageHint" hidden></div>
+                    </div>
                     <div class="form-group">
                         <label for="barcode">商品条码:</label>
                         <div class="barcode-input-wrapper">
-                            <input type="text" id="barcode" name="barcode" placeholder="扫描或输入条码" required>
+                            <input type="text" id="barcode" name="barcode" placeholder="扫码或输入；没有条码就留空" autocomplete="off">
                             <button type="button" id="scanBtn" class="btn-scan" title="摄像头扫码">📷</button>
                         </div>
-                    </div>
-                    <div class="form-group">
-                        <label for="productName">商品名称:</label>
-                        <input type="text" id="productName" name="productName" placeholder="自动带出或手动输入" required>
+                        <div class="field-hint" id="barcodeHint" hidden></div>
                     </div>
                     <div class="form-row">
                         <div class="form-group">
@@ -140,6 +183,7 @@
                 <div class="mapping-controls">
                     <input type="text" id="newBarcode" placeholder="新条码">
                     <input type="text" id="newProductName" placeholder="商品名称">
+                    <select id="newPackage" title="包装方式（选填）"></select>
                     <button id="addMappingBtn" class="btn btn-primary">添加映射</button>
                 </div>
                 <div class="scrollable-content">
@@ -149,6 +193,7 @@
                                 <th>序号</th>
                                 <th>条码</th>
                                 <th>商品名称</th>
+                                <th>包装</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
@@ -212,6 +257,6 @@
         </div>
     </div>
 
-    <script src="script.js?v=202609210842"></script>
+    <script src="script.js?v=202611021718"></script>
 </body>
 </html>

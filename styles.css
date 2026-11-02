@@ -461,6 +461,36 @@ td .btn {
     min-width: 200px;
 }
 
+/* 包装下拉：和旁边的输入框同高，别让 select 的默认样式把这一行撑歪。
+   全局给 select 写了 width:100%，这里必须改回 auto，否则它会独占一行、
+   把「添加映射」按钮挤到下一行去 */
+.mapping-controls select {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 118px;
+    padding: 10px 8px;
+    font-size: 14px;
+    font-family: inherit;
+    color: #333;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+/* 映射表里「未填」的包装：灰一点，一眼看出是缺的而不是选了空 */
+.pkg-empty {
+    color: #bbb;
+}
+
+/* 包装列压窄居中，把宽度让给「操作」——手机上加了这一列后，
+   操作按钮容易被挤出屏幕，得横向滑才点得到 */
+#mappingTable th:nth-child(4),
+#mappingTable td:nth-child(4) {
+    width: 62px;
+    text-align: center;
+    white-space: nowrap;
+}
+
 /* 搜索控件样式 */
 .search-controls {
     display: flex;
@@ -952,4 +982,429 @@ td .btn {
     text-align: center;
     color: #9e9e9e;
     padding: 16px;
+}
+/* ===================== 录入辅助：名称候选 / 最近商品 ===================== */
+
+/* 最近进过的商品：点一下直接填好条码 + 名称 */
+.recent-strip {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    background: #f7fbf7;
+    border: 1px solid #e0eee0;
+    border-radius: 8px;
+}
+
+.recent-label {
+    flex: 0 0 auto;
+    font-size: 13px;
+    color: #6b8f6b;
+    padding-top: 6px;
+}
+
+.recent-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+}
+
+.recent-chip {
+    max-width: 100%;
+    padding: 5px 11px;
+    font-size: 13px;
+    font-family: inherit;
+    color: #2f6b2f;
+    background: #fff;
+    border: 1px solid #cfe3cf;
+    border-radius: 999px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.recent-chip:hover,
+.recent-chip:active {
+    background: #4CAF50;
+    border-color: #4CAF50;
+    color: #fff;
+}
+
+/* 名称输入 + 候选下拉 */
+.name-input-wrapper {
+    position: relative;
+}
+
+.name-suggest {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 40;
+    max-height: 264px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #d9e6d9;
+    border-radius: 8px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+
+.suggest-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #f2f6f2;
+}
+
+.suggest-item:last-child {
+    border-bottom: none;
+}
+
+.suggest-item:hover {
+    background: #eef7ee;
+}
+
+.suggest-name {
+    font-size: 14px;
+    color: #333;
+    word-break: break-all;
+}
+
+.suggest-name b {
+    color: #2e7d32;
+    background: #e8f5e9;
+    border-radius: 3px;
+    font-weight: 600;
+}
+
+.suggest-code {
+    flex: 0 0 auto;
+    font-size: 12px;
+    color: #8a8a8a;
+    font-family: Consolas, Monaco, monospace;
+}
+
+.suggest-code.is-nb {
+    color: #b26a00;
+    background: #fff4e0;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.suggest-empty {
+    padding: 12px;
+    font-size: 13px;
+    color: #888;
+    text-align: center;
+}
+
+/* ===================== 搜索框下方的「加一批」 ===================== */
+
+/* 放在文档流里而不是浮层：手机上浮层会被键盘和屏幕边缘裁掉，
+   而这里展开后直接把下面的表格推下去，内容全看得见 */
+.list-assist {
+    margin-bottom: 12px;
+    padding: 12px;
+    background: #f7fbf7;
+    border: 1px solid #dfeee0;
+    border-radius: 8px;
+}
+
+.assist-head {
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #6b8f6b;
+}
+
+.assist-items {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.assist-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 11px;
+    font-family: inherit;
+    font-size: 14px;
+    text-align: left;
+    color: #333;
+    background: #fff;
+    border: 1px solid #d9e6d9;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.assist-item:hover,
+.assist-item:active {
+    background: #eef7ee;
+    border-color: #9ccc9c;
+}
+
+.assist-name {
+    flex: 1;
+    min-width: 0;
+    word-break: break-all;
+}
+
+.assist-name b {
+    color: #2e7d32;
+    background: #e8f5e9;
+    border-radius: 3px;
+    font-weight: 600;
+}
+
+.assist-code {
+    flex: 0 0 auto;
+    font-size: 12px;
+    color: #8a8a8a;
+    font-family: Consolas, Monaco, monospace;
+    white-space: nowrap;
+}
+
+.assist-code.is-nb {
+    color: #b26a00;
+    background: #fff4e0;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.assist-go {
+    flex: 0 0 auto;
+    padding: 3px 9px;
+    font-size: 12px;
+    color: #2e7d32;
+    background: #e8f5e9;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.assist-new {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: #888;
+}
+
+.assist-new-btn {
+    padding: 0 2px;
+    font-family: inherit;
+    font-size: 13px;
+    color: #2e7d32;
+    background: none;
+    border: none;
+    border-bottom: 1px dashed #9ccc9c;
+    cursor: pointer;
+}
+
+/* 就地录入面板 */
+.batch-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.batch-target {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.batch-mode {
+    flex: 0 0 auto;
+    padding: 3px 8px;
+    font-size: 12px;
+    color: #2e7d32;
+    background: #e8f5e9;
+    border-radius: 4px;
+}
+
+.batch-mode.is-new {
+    color: #b26a00;
+    background: #fff4e0;
+}
+
+.batch-name-input {
+    flex: 1;
+    min-width: 160px;
+    padding: 7px 10px;
+    font-size: 14px;
+    font-family: inherit;
+    color: #333;
+    background: #f2f5f2;
+    border: 1px solid #dfe8df;
+    border-radius: 6px;
+}
+
+/* 只读 = 灰底不可动；点了「改名」才变白底可编辑，避免手滑改掉全库记录 */
+.batch-name-input:not([readonly]) {
+    background: #fff;
+    border-color: #4CAF50;
+}
+
+.batch-code-input {
+    flex: 1;
+    min-width: 160px;
+    padding: 7px 10px;
+    font-size: 14px;
+    font-family: inherit;
+    border: 1px solid #cfdccf;
+    border-radius: 6px;
+}
+
+.batch-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.batch-fields label {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 140px;
+    font-size: 12px;
+    color: #6b8f6b;
+}
+
+.batch-fields input,
+.batch-fields select {
+    padding: 8px 10px;
+    font-size: 14px;
+    font-family: inherit;
+    color: #333;
+    background: #fff;
+    border: 1px solid #cfdccf;
+    border-radius: 6px;
+}
+
+.inline-pair {
+    display: flex;
+    gap: 4px;
+}
+
+.inline-pair input {
+    flex: 1;
+    min-width: 62px;
+}
+
+.inline-pair select {
+    flex: 0 0 auto;
+}
+
+.batch-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* 字段下方的小提示 */
+.field-hint {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.field-hint.is-ok {
+    color: #2e7d32;
+}
+
+.field-hint.is-new {
+    color: #b26a00;
+}
+
+/* 本地预览模式标识：只说清"数据不上传"，不挡操作 */
+.preview-banner {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 8px 40px 8px 14px;
+    background: #fff3cd;
+    border-top: 1px solid #ffe08a;
+    color: #7a5c00;
+    font-size: 12.5px;
+    line-height: 1.4;
+    text-align: center;
+}
+
+.preview-banner strong {
+    color: #8a4b00;
+}
+
+.preview-banner-close {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: none;
+    background: transparent;
+    color: #7a5c00;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 2px 6px;
+}
+
+/* 有预览条时给页面底部留出空间，免得遮住最后一个按钮 */
+body.has-preview-banner {
+    padding-bottom: 42px;
+}
+
+@media (max-width: 560px) {
+    .recent-strip {
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    .recent-label {
+        padding-top: 0;
+    }
+
+    .suggest-item {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    /* 手机上一行塞不下「生产日期 + 保质期」，两个输入框会被压到几乎点不动，
+       干脆每个字段占满一整行 —— 表格往下推一点无所谓，能填才要紧 */
+    .batch-fields label {
+        min-width: 100%;
+    }
+
+    .batch-name-input,
+    .batch-code-input {
+        min-width: 100%;
+    }
+
+    /* 三个按钮不各占一行：「记一条」占满，两个次要按钮并排 */
+    .batch-actions .btn-primary {
+        flex: 1 0 100%;
+    }
+
+    .batch-actions .btn-secondary {
+        flex: 1 1 44%;
+    }
 }
