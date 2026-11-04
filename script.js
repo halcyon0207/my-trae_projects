@@ -643,7 +643,10 @@ function bindEventListeners() {
 
     if (nameInput) {
         // 输入即出候选。不走防抖：只是过滤几十条档案，比重建整张表轻得多
-        nameInput.addEventListener('input', renderNameSuggest);
+        nameInput.addEventListener('input', function() {
+            renderNameSuggest();
+            renderNameFormat(document.getElementById('productNameFormat'), nameInput.value);
+        });
         nameInput.addEventListener('focus', renderNameSuggest);
         // 键盘：↓ 进候选、Esc 关掉，方便不打字也能选
         nameInput.addEventListener('keydown', function(e) {
@@ -785,7 +788,9 @@ function bindEventListeners() {
 
             const newBtn = t.closest ? t.closest('.assist-new-btn') : null;
             if (newBtn) {
-                openBatchPanel('new', '', newBtn.getAttribute('data-name'));
+                openBatchPanel('new',
+                    newBtn.getAttribute('data-barcode') || '',
+                    newBtn.getAttribute('data-name') || '');
                 return;
             }
 
@@ -816,6 +821,10 @@ function bindEventListeners() {
 
         // 日期联动：生产日期 / 保质期一改就自动算有效期
         listAssist.addEventListener('input', function(e) {
+            if (e.target.id === 'batchNameInput') {
+                renderNameFormat(document.getElementById('batchNameFormat'), e.target.value);
+                return;
+            }
             if (e.target.id === 'batchProductionDate' || e.target.id === 'batchShelfLife') {
                 syncBatchValidity();
             }
@@ -957,8 +966,9 @@ function renderNameSuggest() {
 
     const hits = searchMappings(query).slice(0, 8);
     if (hits.length === 0) {
-        box.innerHTML = '<div class="suggest-empty">没有匹配 · 继续输入就是新建</div>';
-        box.hidden = false;
+        // 没命中就别弹个空框：它正好压在下面的格式预览上，而「继续输入就是新建」
+        // 这句话本来也没提供什么信息
+        hideNameSuggest();
         return;
     }
 
@@ -1122,7 +1132,176 @@ function setMappingPackage(barcode, packageType) {
  * 只有「从来没进过的货」才需要专门去「添加商品」（那边能扫码、能填全）。
  * ================================================== */
 
+/* ===================== 4.65 名称格式：分类-特征-规格-品牌 =====================
+ * 规则正文在 自检表/商品名称录入规则.md。这里只做一件事：让名字录进来的时候
+ * 就长成那个样子，而不是录完再回头一条条改。
+ * 四个槽位固定、顺序固定、分隔符固定 = 半角减号，其余写法一律收口。
+ * ================================================== */
+
+const NAME_SEGMENTS = ['分类', '特征', '规格', '品牌'];
+
+// 规格：数字 + 单位（38g / 500ml / 5mm）；实在不知道克重才用「小瓶」「大袋」占位
+const SIZE_RE = /^\d+(?:\.\d+)?(?:g|kg|ml|mL|L|l|mm|cm|片|只|个|包|支|袋|瓶|张|条|枚)$/;
+const SIZE_WORD_RE = /^(?:小瓶|中瓶|大瓶|小袋|中袋|大袋|单片|独立包装)$/;
+
+function isSizeSegment(s) {
+    const t = String(s || '').trim();
+    return SIZE_RE.test(t) || SIZE_WORD_RE.test(t);
+}
+
+/* 把人随手打的东西收成规范格式。
+ * 空格、顿号、逗号、分号、斜杠、括号都当分隔符 —— 打「色素 蓝莓色 38g 法采」
+ * 和打「色素-蓝莓色-38g-法采」是同一个结果，不用记分隔符该用哪个。 */
+function canonicalName(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    return s
+        .replace(/[（(]/g, '-')
+        .replace(/[）)]/g, '-')
+        .replace(/[－—–]/g, '-')
+        .replace(/[·・•]/g, '-')
+        .replace(/[、，,；;／/\\|]+/g, '-')
+        .replace(/\s+/g, '-')
+        .replace(/-{2,}/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
+function nameSegmentList(name) {
+    const canon = canonicalName(name);
+    return canon ? canon.split('-').filter(Boolean) : [];
+}
+
+/* 品牌词表从现有档案里学：三段以上的名字，最后一段如果不长成规格，那它就是
+ * 历次录进来的品牌。用自己库里已有的词判断，比硬编码一张品牌表可靠 ——
+ * 新品牌第一次出现时认不出，会退回「两段 = 分类-特征」的保守判断。 */
+function knownBrandWords() {
+    const set = new Set();
+    if (typeof productMappings === 'undefined' || !productMappings) return set;
+    productMappings.forEach(function (m) {
+        const parts = nameSegmentList(m.productName);
+        if (parts.length < 3) return;
+        const last = parts[parts.length - 1];
+        if (isSizeSegment(last)) return;
+        // 带包装字样的多半是老数据把包装塞进了名字（`-盒装60g`、`-小袋单独包`），不是品牌
+        if (/装|袋|瓶|盒|罐|箱/.test(last)) return;
+        set.add(last);
+    });
+    return set;
+}
+
+/* 按段位还原：分类永远是第一段；品牌通常在最后一段（且不长成规格），
+ * 但两段的名字里最后一段也可能是特征（`装饰糖-金币造型`）——
+ * 所以「认得出来的品牌」或「至少三段」才当品牌，否则按特征算。
+ * 中间挑那个带单位的当规格，剩下的都算特征。缺段时后面的段会前移，只能按内容认。 */
+function parseNameSegments(name) {
+    const rest = nameSegmentList(name);
+    const out = { 分类: '', 特征: '', 规格: '', 品牌: '' };
+    if (!rest.length) return out;
+
+    out['分类'] = rest.shift();
+
+    if (rest.length && !isSizeSegment(rest[rest.length - 1])) {
+        const last = rest[rest.length - 1];
+        if (rest.length >= 2 || knownBrandWords().has(last)) out['品牌'] = rest.pop();
+    }
+
+    const middle = [];
+    rest.forEach(function (p) {
+        if (!out['规格'] && isSizeSegment(p)) out['规格'] = p;
+        else middle.push(p);
+    });
+    out['特征'] = middle.join('-');
+    return out;
+}
+
+// 实时拆段预览。box 是容器，raw 是输入框当前内容
+function renderNameFormat(box, raw) {
+    if (!box) return;
+
+    const text = String(raw || '').trim();
+    if (!text) {
+        box.hidden = true;
+        box.innerHTML = '';
+        return;
+    }
+
+    const canon = canonicalName(text);
+    const all = canon ? canon.split('-').filter(Boolean) : [];
+    const overflow = all.slice(4);
+
+    /* 段数没超时按内容认段（缺段会自动前移，不能按位置硬对）；
+     * 超了就没法认了 —— 这时按位置摆，让人一眼看出多出来的是哪个 */
+    const segs = overflow.length
+        ? { 分类: all[0] || '', 特征: all[1] || '', 规格: all[2] || '', 品牌: all[3] || '' }
+        : parseNameSegments(canon);
+
+    let html = '<div class="nf-slots">';
+    NAME_SEGMENTS.forEach(function (label) {
+        const v = segs[label];
+        html += '<span class="nf-slot' + (v ? '' : ' is-empty') + '">' +
+                  '<i>' + label + '</i>' + escapeHtml(v || '空') +
+                '</span>';
+    });
+    overflow.forEach(function (v) {
+        html += '<span class="nf-slot is-extra"><i>多出</i>' + escapeHtml(v) + '</span>';
+    });
+    html += '</div>';
+
+    if (canon !== text) {
+        html += '<div class="nf-note">保存时按 <b>' + escapeHtml(canon) + '</b> 存</div>';
+    }
+    if (overflow.length) {
+        html += '<div class="nf-warn">超过 4 段：多出来的「' + escapeHtml(overflow.join('」「')) +
+                '」并进相邻那段，或删掉。</div>';
+    }
+
+    box.innerHTML = html;
+    box.hidden = false;
+}
+
+// 存之前统一过一遍格式。返回规范后的名字
+function normalizeNameOrWarn(raw) {
+    const canon = canonicalName(raw);
+    if (!canon) return '';
+    if (canon.split('-').filter(Boolean).length > 4) {
+        showToast('名称最多 4 段（分类-特征-规格-品牌），现在段数超了', '#f44336', 5000);
+        return '';
+    }
+    return canon;
+}
+
 let assistState = null;   // { mode:'existing'|'new', barcode, name, query }
+
+/* 一串纯数字就是条码，不是商品名 —— 商品名里出现纯数字串的概率基本为零。
+ * 下限给 6 位（散装 6 位内码），上限 14 位（ITF-14），内部码 NB0001 也算。 */
+function looksLikeBarcode(text) {
+    const s = String(text || '').trim();
+    if (!s) return false;
+    if (/^NB\d{3,}$/i.test(s)) return true;
+    return /^\d{6,14}$/.test(s);
+}
+
+/* 名称和条码的位置可能被填反：人只想着「把这串东西录进去」，
+ * 扫码枪焦点跑偏也会把码打进名称格。按内容摆正，不按格子。 */
+function normalizeEntryPair(rawName, rawCode) {
+    let name = String(rawName || '').trim();
+    let code = String(rawCode || '').trim();
+
+    const nameIsCode = looksLikeBarcode(name);
+    const codeIsName = !!code && !looksLikeBarcode(code);
+
+    if (nameIsCode && codeIsName) {           // 两格整个对调
+        const t = name; name = code; code = t;
+    } else if (nameIsCode && !code) {          // 条码填进了名称格
+        code = name; name = '';
+    } else if (codeIsName && !name) {          // 名称填进了条码格
+        name = code; code = '';
+    } else if (name && code && nameIsCode) {   // 两格都是码：留条码格那个，逼着填名称
+        name = '';
+    }
+
+    return { name: name, code: code };
+}
 
 function hideListAssist() {
     const box = document.getElementById('listAssist');
@@ -1191,10 +1370,16 @@ function renderAssistCandidates(query) {
         html += '</div>';
     }
 
+    // 输的是条码：别把码当商品名，直接带进条码框，只让人补名称
+    const isCodeQuery = looksLikeBarcode(query);
     html += '<div class="assist-new">' +
-            (hits.length ? '都不是这个？' : '库里没有「' + escapeHtml(query) + '」，') +
-            '<button type="button" class="assist-new-btn" data-name="' + escapeHtml(query) + '">' +
-            '当新商品录</button></div>';
+            (hits.length ? '都不是这个？'
+                         : (isCodeQuery ? '这个条码还没建档，' : '库里没有「' + escapeHtml(query) + '」，')) +
+            '<button type="button" class="assist-new-btn"' +
+            ' data-name="' + escapeHtml(isCodeQuery ? '' : query) + '"' +
+            ' data-barcode="' + escapeHtml(isCodeQuery ? query : '') + '">' +
+            (isCodeQuery ? '新建这个商品' : '当新商品录') +
+            '</button></div>';
 
     box.innerHTML = html;
     box.hidden = false;
@@ -1220,13 +1405,19 @@ function openBatchPanel(mode, barcode, name) {
     html += '<div class="batch-target">' +
               '<span class="batch-mode' + (mode === 'new' ? ' is-new' : '') + '">' +
                 (mode === 'new' ? '新商品' : '已在库里') + '</span>' +
-              '<input type="text" class="batch-name-input" id="batchNameInput" readonly value="' +
-                escapeHtml(name) + '">' +
+              '<input type="text" class="batch-name-input" id="batchNameInput"' +
+                (mode === 'new' ? ' placeholder="按 分类-特征-规格-品牌 填"' : ' readonly') +
+                ' value="' + escapeHtml(name) + '">' +
               (mode === 'new'
-                ? '<input type="text" class="batch-code-input" id="batchCodeInput" ' +
-                  'placeholder="条码（没有就留空，系统自动发号）" autocomplete="off">'
+                ? '<label class="batch-code-field"><span>条码</span>' +
+                  '<input type="text" class="batch-code-input" id="batchCodeInput" ' +
+                  'value="' + escapeHtml(barcode) + '" ' +
+                  'placeholder="没有就留空，系统自动发号" autocomplete="off"></label>'
                 : '<span class="assist-code' + (isNB ? ' is-nb' : '') + '">' + escapeHtml(barcode) + '</span>') +
             '</div>';
+
+    // 名称格式预览：边打边看四段落在哪，不用记顺序
+    html += '<div class="name-format" id="batchNameFormat" hidden></div>';
 
     html += '<div class="batch-fields">' +
               '<label>包装<select id="batchPackage">' +
@@ -1245,7 +1436,8 @@ function openBatchPanel(mode, barcode, name) {
 
     html += '<div class="batch-actions">' +
               '<button type="button" class="btn btn-primary" id="batchSaveBtn">记一条</button>' +
-              '<button type="button" class="btn btn-secondary" id="batchRenameBtn">改名</button>' +
+              (mode === 'new' ? '' :
+                '<button type="button" class="btn btn-secondary" id="batchRenameBtn">改名</button>') +
               '<button type="button" class="btn btn-secondary" id="batchBackBtn">换商品</button>' +
             '</div>';
     html += '</div>';
@@ -1253,8 +1445,17 @@ function openBatchPanel(mode, barcode, name) {
     box.innerHTML = html;
     box.hidden = false;
 
+    const fmtBox = document.getElementById('batchNameFormat');
+    if (fmtBox && mode === 'new') renderNameFormat(fmtBox, name);
+
+    // 新商品：名称还空着就先把光标放名称上，别让人去猜该填哪格
+    const nm = document.getElementById('batchNameInput');
     const pd = document.getElementById('batchProductionDate');
-    if (pd) pd.focus();
+    if (mode === 'new' && nm && !nm.value.trim()) {
+        if (nm) nm.focus();
+    } else if (pd) {
+        pd.focus();
+    }
 }
 
 // 从三个输入算有效期，和主表单的算法保持一致
@@ -1293,13 +1494,45 @@ function saveBatchRecord() {
 
     const nameInput = document.getElementById('batchNameInput');
     const validityInput = document.getElementById('batchValidity');
-    const name = String(nameInput ? nameInput.value : '').trim();
+    const codeInput = document.getElementById('batchCodeInput');
+
+    let name = String(nameInput ? nameInput.value : '').trim();
+    let rawCode = codeInput ? codeInput.value.trim() : '';
+
+    // 新商品：两格可能被填反（条码打进名称、名字打进条码），提交前按内容摆正
+    if (assistState.mode === 'new') {
+        const pair = normalizeEntryPair(name, rawCode);
+        if (pair.name !== name || pair.code !== rawCode) {
+            name = pair.name;
+            rawCode = pair.code;
+            if (nameInput) nameInput.value = name;
+            if (codeInput) codeInput.value = rawCode;
+        }
+    }
+
     const validity = validityInput ? validityInput.value : '';
 
     if (!name) {
-        showToast('商品名称不能为空', '#f44336');
+        showToast(looksLikeBarcode(rawCode) ? '条码认出来了，还差商品名称'
+                                           : '商品名称不能为空', '#f44336', 4000);
+        if (nameInput) nameInput.focus();
         return;
     }
+
+    /* 名称格式收口。新商品一律按「分类-特征-规格-品牌」存；
+     * 老商品只在真的改了名时才收口 —— 否则点一下「记一条」就顺手把旧名字重写了，
+     * 那是没人要求的改动。 */
+    const isRenaming = assistState.mode === 'new' || name !== String(assistState.name || '').trim();
+    if (isRenaming) {
+        const canon = normalizeNameOrWarn(name);
+        if (!canon) { if (nameInput) nameInput.focus(); return; }
+        if (canon !== name) {
+            name = canon;
+            if (nameInput) nameInput.value = name;
+            renderNameFormat(document.getElementById('batchNameFormat'), name);
+        }
+    }
+
     if (!validity) {
         showToast('有效期还没填', '#f44336');
         if (validityInput) validityInput.focus();
@@ -1330,9 +1563,7 @@ function saveBatchRecord() {
     let barcode = assistState.barcode;
 
     if (assistState.mode === 'new') {
-        const codeInput = document.getElementById('batchCodeInput');
-        const raw = codeInput ? codeInput.value.trim() : '';
-        const resolved = resolveBarcodeAndName(raw, name);
+        const resolved = resolveBarcodeAndName(rawCode, name);
         barcode = resolved.barcode;
         assistState.barcode = barcode;      // 已建档，后面连记几条都沿用这个码
         assistState.mode = 'existing';
@@ -1632,9 +1863,36 @@ function handleProductSubmit(e) {
     let productName = String(formData.get('productName') || '').trim();
     let note = '';
 
+    // 同一个判断也管大表单：扫码枪焦点跑偏、或直接把码打进名称格，都要认出来
+    const pair = normalizeEntryPair(productName, barcode);
+    if (pair.name !== productName || pair.code !== barcode) {
+        productName = pair.name;
+        barcode = pair.code;
+        const elName = document.getElementById('productName');
+        const elCode = document.getElementById('barcode');
+        if (elName) elName.value = productName;
+        if (elCode) elCode.value = barcode;
+    }
+
     if (!productName) {
-        showToast('商品名称不能为空', '#f44336');
+        showToast(barcode ? '条码已填好，还差商品名称' : '商品名称不能为空', '#f44336', 4000);
+        const elName = document.getElementById('productName');
+        if (elName) elName.focus();
         return;
+    }
+
+    // 名称按「分类-特征-规格-品牌」收口：空格、括号、顿号一律换成半角减号
+    const canonName = normalizeNameOrWarn(productName);
+    if (!canonName) {
+        const elName = document.getElementById('productName');
+        if (elName) elName.focus();
+        return;
+    }
+    if (canonName !== productName) {
+        productName = canonName;
+        const elName = document.getElementById('productName');
+        if (elName) elName.value = productName;
+        renderNameFormat(document.getElementById('productNameFormat'), productName);
     }
 
     const resolved = resolveBarcodeAndName(barcode, productName);
@@ -2298,7 +2556,8 @@ window.undoHandle = function(id) {
 // 添加映射
 function addMapping() {
     const barcode = document.getElementById('newBarcode').value;
-    const productName = document.getElementById('newProductName').value;
+    const nameEl = document.getElementById('newProductName');
+    const productName = canonicalName(nameEl ? nameEl.value : '');
     const pkgEl = document.getElementById('newPackage');
     const packageType = pkgEl ? pkgEl.value : '';
     const addMappingBtn = document.getElementById('addMappingBtn');
@@ -2308,6 +2567,13 @@ function addMapping() {
         alert('请填写完整的条码和商品名称！');
         return;
     }
+    if (productName.split('-').filter(Boolean).length > 4) {
+        alert('名称最多 4 段：分类-特征-规格-品牌。现在段数超了，先并一并。');
+        return;
+    }
+
+    // 顺手把输入框写成规范格式，让人看见「存进去的是这个」
+    if (nameEl) nameEl.value = productName;
 
     if (isEditing) {
         // 编辑模式：更新现有映射

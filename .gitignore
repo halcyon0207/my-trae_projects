@@ -14,6 +14,9 @@ cloudfunctions/site/public/
 # 发布静态页面时的暂存目录
 .deploy-tmp/
 
+# 本地运维脚本（读 .env.local 里的 token，只在开发机跑）
+scripts/_push_api.js
+
 # 本地数据与工作产物——本仓库是 public（GitHub Pages 免费版要求），
 # 下面这些含真实商品条码、名称、到期日，一旦推上去就是公开的，绝不许提交：
 #   preview-data.js  本地预览用的数据快照（线上不需要，PREVIEW_MODE=false 时不读取）

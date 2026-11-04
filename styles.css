@@ -1039,6 +1039,79 @@ td .btn {
     position: relative;
 }
 
+/* 名称格式预览：四段拆开摆着，边打边看自己填的落在哪个位置。
+   目的不是校验报错，是让「分类-特征-规格-品牌」变成看得见的东西 */
+.name-format {
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: #f7faf7;
+    border: 1px dashed #d8e6d8;
+    border-radius: 6px;
+}
+
+.nf-slots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.nf-slot {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 5px;
+    max-width: 100%;
+    padding: 3px 8px;
+    font-size: 13px;
+    color: #333;
+    background: #fff;
+    border: 1px solid #dfe8df;
+    border-radius: 4px;
+    word-break: break-all;
+}
+
+.nf-slot i {
+    flex: 0 0 auto;
+    font-style: normal;
+    font-size: 11px;
+    color: #8aa08a;
+}
+
+.nf-slot.is-empty {
+    background: transparent;
+    border-style: dashed;
+    color: #b9c4b9;
+}
+
+.nf-slot.is-extra {
+    color: #c62828;
+    background: #fff5f5;
+    border-color: #f0b8b8;
+}
+
+.nf-slot.is-extra i {
+    color: #d98a8a;
+}
+
+.nf-note {
+    margin-top: 7px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #7a847a;
+}
+
+.nf-note b {
+    color: #2e7d32;
+    font-weight: 600;
+    word-break: break-all;
+}
+
+.nf-warn {
+    margin-top: 5px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #d84315;
+}
+
 .name-suggest {
     position: absolute;
     left: 0;
@@ -1265,6 +1338,22 @@ td .btn {
     font-family: inherit;
     border: 1px solid #cfdccf;
     border-radius: 6px;
+}
+
+/* 新商品的条码框带个小标题：填了值以后 placeholder 就没了，
+   不标一下看不出这格是条码还是名称 */
+.batch-code-field {
+    flex: 1 1 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: #777;
+}
+
+.batch-code-field .batch-code-input {
+    width: 100%;
+    min-width: 0;
 }
 
 .batch-fields {
